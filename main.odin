@@ -254,8 +254,6 @@ main :: proc() {
 
 	// fmt.printfln("%x", mem[0x800:][:100])
 
-	if true do return
-
 	window(source)
 }
 
