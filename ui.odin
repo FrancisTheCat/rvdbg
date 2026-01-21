@@ -49,6 +49,7 @@ Ui_Button_State :: enum {
 
 Ui_State :: struct {
 	size:            [2]int,
+	manual_size:     [2]int,
 	drag_start:      [2]int,
 	size_drag_start: [2]int,
 	active:          bool,
@@ -306,14 +307,17 @@ _ui_section :: proc(ctx: ^Ui_Context, id: string, direction: Ui_Direction, flags
 	state := ui_state(ctx, id)
 	frame := ctx.frame
 
+	size := state.size
 	if .Resizeable in flags {
-		assert(.Separator in flags)
+		assert(.Separator in flags, "resizable sections must have a separator")
+		// this is fine, we only use the manual_size for the adjustable coordinate anyway
+		size = la.max(size, state.manual_size)
 	}
 	
 	separator_rect: Ui_Rect
 	switch direction {
 	case .Down:
-		frame.rect.min.y += state.size.y + UI_PADDING
+		frame.rect.min.y += size.y + UI_PADDING
 		if .Separator in flags {
 			separator_rect = {
 				min = { frame.rect.min.x, frame.rect.min.y,                   },
@@ -321,9 +325,9 @@ _ui_section :: proc(ctx: ^Ui_Context, id: string, direction: Ui_Direction, flags
 			} 
 			frame.rect.min.y += UI_PADDING + UI_BORDER_WIDTH
 		}
-		ctx.frame.rect.max.y = ctx.frame.rect.min.y + state.size.y
+		ctx.frame.rect.max.y = ctx.frame.rect.min.y + size.y
 	case .Up:
-		frame.rect.max.y -= state.size.y + UI_PADDING
+		frame.rect.max.y -= size.y + UI_PADDING
 		if .Separator in flags {
 			separator_rect = {
 				min = { frame.rect.min.x, frame.rect.max.y - UI_BORDER_WIDTH, },
@@ -331,9 +335,9 @@ _ui_section :: proc(ctx: ^Ui_Context, id: string, direction: Ui_Direction, flags
 			}
 			frame.rect.max.y -= UI_PADDING + UI_BORDER_WIDTH
 		}
-		ctx.frame.rect.min.y = ctx.frame.rect.max.y - state.size.y
+		ctx.frame.rect.min.y = ctx.frame.rect.max.y - size.y
 	case .Right:
-		frame.rect.min.x += state.size.x + UI_PADDING
+		frame.rect.min.x += size.x + UI_PADDING
 		if .Separator in flags {
 			separator_rect = {
 				min = { frame.rect.min.x,                   frame.rect.min.y, },
@@ -341,9 +345,9 @@ _ui_section :: proc(ctx: ^Ui_Context, id: string, direction: Ui_Direction, flags
 			}
 			frame.rect.min.x -= UI_PADDING + UI_BORDER_WIDTH
 		}
-		ctx.frame.rect.min.x = ctx.frame.rect.max.x - state.size.x
+		ctx.frame.rect.min.x = ctx.frame.rect.max.x - size.x
 	case .Left:
-		frame.rect.max.x -= state.size.x + UI_PADDING
+		frame.rect.max.x -= size.x + UI_PADDING
 		if .Separator in flags {
 			separator_rect = {
 				min = { frame.rect.max.x,                   frame.rect.min.y, },
@@ -351,7 +355,7 @@ _ui_section :: proc(ctx: ^Ui_Context, id: string, direction: Ui_Direction, flags
 			}
 			frame.rect.max.x -= UI_PADDING + UI_BORDER_WIDTH
 		}
-		ctx.frame.rect.min.x = ctx.frame.rect.max.x - state.size.x
+		ctx.frame.rect.min.x = ctx.frame.rect.max.x - size.x
 	}
 
 	append(&ctx.stack, frame)
@@ -360,7 +364,8 @@ _ui_section :: proc(ctx: ^Ui_Context, id: string, direction: Ui_Direction, flags
 	separator_color := UI_BORDER_COLOR
 	if .Resizeable in flags {
 		if state.drag_start != 0 {
-			separator_color = UI_TEXT_COLOR
+			separator_color   = UI_TEXT_COLOR
+			state.manual_size = state.size + state.drag_start - ctx.mouse_position
 			if ctx.mouse_buttons[0] == .None {
 				state.drag_start = 0
 			}
