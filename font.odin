@@ -12,8 +12,8 @@ import "glodin"
 ATLAS_RESOLUTION :: 512
 
 FONT_PATHS :: [Ui_Font]string {
-	// .Interface = "/usr/share/fonts/inter/InterVariable.ttf",
-	.Interface = "/usr/share/fonts/TTF/JetBrainsMonoNerdFont-Regular.ttf",
+	.Interface = "/usr/share/fonts/inter/InterVariable.ttf",
+	// .Interface = "/usr/share/fonts/TTF/JetBrainsMonoNerdFont-Regular.ttf",
 	.Monospace = "/usr/share/fonts/TTF/JetBrainsMonoNerdFont-Regular.ttf",
 }
 
@@ -110,7 +110,9 @@ window :: proc(text: string) {
 		ui_ctx.max.y = int(h)
 
 		x, y                 := glfw.GetCursorPos(window)
-		ui_ctx.mouse_position = { int(x), int(y), }
+		mouse_position       := [2]int{ int(x), int(y), }
+		ui_ctx.mouse_delta    = mouse_position - ui_ctx.mouse_position
+		ui_ctx.mouse_position = mouse_position
 
 		for &button, i in ui_ctx.mouse_buttons {
 			pressed := glfw.GetMouseButton(window, i32(i)) == glfw.PRESS

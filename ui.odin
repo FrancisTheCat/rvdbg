@@ -5,6 +5,7 @@ import "base:intrinsics"
 import "core:fmt"
 import "core:hash"
 import "core:strings"
+import os "core:os/os2"
 import la "core:math/linalg"
 
 Ui_Rect :: struct {
@@ -48,11 +49,10 @@ Ui_Button_State :: enum {
 }
 
 Ui_State :: struct {
-	size:            [2]int,
-	manual_size:     [2]int,
-	drag_start:      [2]int,
-	size_drag_start: [2]int,
-	active:          bool,
+	size:        [2]int,
+	manual_size: [2]int,
+	dragged:     bool,
+	active:      bool,
 }
 
 Ui_Direction :: enum {
@@ -70,6 +70,7 @@ Ui_Frame :: struct {
 
 Ui_Context :: struct {
 	mouse_position: [2]int,
+	mouse_delta:    [2]int,
 	mouse_buttons:  [2]Ui_Button_State,
 
 	using frame:    Ui_Frame,
@@ -213,6 +214,10 @@ ui_button :: proc(ctx: ^Ui_Context, text: string, out_rect: ^Ui_Rect = nil) -> (
 	rect   := ui_insert_rect(ctx, { width, height, })
 	result  = ui_rect_result(ctx, rect)
 
+	if ctx.direction == .Down {
+		rect.max.x = ctx.max.x
+	}
+
 	if out_rect != nil {
 		out_rect^ = rect
 	}
@@ -343,9 +348,9 @@ _ui_section :: proc(ctx: ^Ui_Context, id: string, direction: Ui_Direction, flags
 				min = { frame.rect.min.x,                   frame.rect.min.y, },
 				max = { frame.rect.min.x + UI_BORDER_WIDTH, frame.rect.max.y, },
 			}
-			frame.rect.min.x -= UI_PADDING + UI_BORDER_WIDTH
+			frame.rect.min.x += UI_PADDING + UI_BORDER_WIDTH
 		}
-		ctx.frame.rect.min.x = ctx.frame.rect.max.x - size.x
+		ctx.frame.rect.max.x = ctx.frame.rect.min.x + size.x
 	case .Left:
 		frame.rect.max.x -= size.x + UI_PADDING
 		if .Separator in flags {
@@ -363,18 +368,31 @@ _ui_section :: proc(ctx: ^Ui_Context, id: string, direction: Ui_Direction, flags
 
 	separator_color := UI_BORDER_COLOR
 	if .Resizeable in flags {
-		if state.drag_start != 0 {
-			separator_color   = UI_TEXT_COLOR
-			state.manual_size = state.size + state.drag_start - ctx.mouse_position
+		if state.dragged {
+			separator_color = UI_TEXT_COLOR
+			switch direction {
+			case .Left:
+				state.manual_size.x -= ctx.mouse_delta.x
+			case .Right:
+				state.manual_size.x += ctx.mouse_delta.x
+			case .Up:
+				state.manual_size.y -= ctx.mouse_delta.y
+			case .Down:
+				state.manual_size.y += ctx.mouse_delta.y
+			}
 			if ctx.mouse_buttons[0] == .None {
-				state.drag_start = 0
+				state.dragged     = false
+				state.manual_size = la.max(state.manual_size, state.size)
 			}
 		} else {
+			if state.manual_size == 0 {
+				state.manual_size = state.size
+			}
+			
 			if rect_contains(rect_inflate(separator_rect, 4), ctx.mouse_position) {
 				separator_color = { 0.55, 0.55, 0.55, 1, }
 				if ctx.mouse_buttons[0] == .Just_Clicked {
-					separator_color  = UI_TEXT_COLOR
-					state.drag_start = ctx.mouse_position
+					state.dragged = true
 				}
 			}
 		}
@@ -528,6 +546,10 @@ debugger_ui :: proc(ctx: ^Ui_Context) {
 		ui_label(ctx, fmt.tprint("Border Width:",  UI_BORDER_WIDTH))
 	}
 
+	if ui_section(ctx, "File Tree", .Right, { .Separator, .Resizeable, }) {
+		ui_button(ctx, "Files")
+	}
+
 	if ui_section(ctx, "Info Section", .Left, { .Separator, .Resizeable, }) {
 		ui_button(ctx, "Registers")
 		ui_label(ctx, "...")
@@ -537,25 +559,26 @@ debugger_ui :: proc(ctx: ^Ui_Context) {
 		ui_label(ctx, "...")
 	}
 
-	text: string = `#pragma qtrvsim show registers
-#pragma qtrvsim show program
-#pragma qtrvsim show memory
-#pragma qtrvsim focus memory 0x1000
-# .globl _start
-.equ SERIAL_PORT_BASE,      0xffffc000
-.equ SERP_TX_ST_REG_o,          0x0008
-.equ SERP_TX_DATA_REG_o,        0x000c
+	if ui_section(ctx, "Output", .Up, { .Separator, .Resizeable, }) {
+		ui_button(ctx, "output")
+	}
 
-.data
-.org 0x800
+	ui_draw_rect(ctx, {
+		{ ctx.max.x - 10, ctx.min.y, },
+		{ ctx.max.x,      ctx.max.y, },
+	}, UI_BUTTON_COLOR, {
+		radius = 5,
+	})
+	size   := 400
+	offset := 0
+	ui_draw_rect(ctx, {
+		{ ctx.max.x - 7, ctx.min.y + 3 + offset,        },
+		{ ctx.max.x - 3, ctx.min.y + 3 + offset + size, },
+	}, UI_BORDER_COLOR, {
+		radius = 2,
+	})
 
-string_one:
-  .byte 4
-  .ascii "one "
-
-string_two:
-  .byte 4
-  .ascii "two "`
+	text      := "Hello World"
 	ctx.min.y += UI_TEXT_HEIGHT
 	max_width := 0
 	for line in strings.split_lines_iterator(&text) {
