@@ -210,8 +210,9 @@ instruction_infos := [Mnemonic]Instruction_Info {
 	.Divu   = { mnemonic = "divu",   args = { .Rd,  .Rs1,    .Rs2,   }, type = .R, funct3 = 0b101, funct7 = 0b000_0001, opcode = 0b011_0011, },
 	.Rem    = { mnemonic = "rem",    args = { .Rd,  .Rs1,    .Rs2,   }, type = .R, funct3 = 0b110, funct7 = 0b000_0001, opcode = 0b011_0011, },
 	.Remu   = { mnemonic = "remu",   args = { .Rd,  .Rs1,    .Rs2,   }, type = .R, funct3 = 0b111, funct7 = 0b000_0001, opcode = 0b011_0011, },
-	
 }
+
+MAX_MNEMONIC_LEN :: 6
 
 R_Type_Instruction :: bit_field u32 {
 	opcode: u8       | 7,
@@ -484,6 +485,7 @@ Section :: struct {
 }
 
 // TODO: rewrite with tokenization
+@(require_results)
 parse_assembly :: proc(
 	data: string,
 	data_allocator  := context.allocator,
@@ -1315,6 +1317,7 @@ parse_assembly :: proc(
 	return ctx.sections[:], ctx.relocations[:], ctx.labels, ctx.errors[:]
 }
 
+@(require_results)
 assemble_instruction :: proc(instruction: Instruction) -> u32 {
 	info := instruction_infos[instruction.mnemonic]
 
@@ -1371,6 +1374,7 @@ assemble_instruction :: proc(instruction: Instruction) -> u32 {
 	return ret
 }
 
+@(require_results)
 assemble_instructions :: proc(instructions: []Instruction, allocator := context.allocator) -> []u32 {
 	output := make([]u32, len(instructions), allocator)
 
@@ -1381,6 +1385,7 @@ assemble_instructions :: proc(instructions: []Instruction, allocator := context.
 	return output
 }
 
+@(require_results)
 disassemble_instruction :: proc(data: u32) -> (inst: Instruction, ok: bool) {
 	opcode := u8(data & 0x7F)
 

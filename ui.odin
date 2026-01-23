@@ -2,10 +2,7 @@ package rvdbg
 
 import "base:intrinsics"
 
-import "core:fmt"
 import "core:hash"
-import "core:strings"
-import os "core:os/os2"
 import la "core:math/linalg"
 
 Ui_Rect :: struct {
@@ -13,10 +10,12 @@ Ui_Rect :: struct {
 }
 
 Ui_Cmd_Text :: struct {
-	position: [2]int,
-	text:     string,
-	color:    [4]f32,
-	z:        int,
+	position:  [2]int,
+	text:      string,
+	color:     [4]f32,
+	z:         int,
+	font:      Ui_Font,
+	font_size: int,
 }
 
 Ui_Cmd_Rect :: struct {
@@ -51,6 +50,7 @@ Ui_Button_State :: enum {
 Ui_State :: struct {
 	size:        [2]int,
 	manual_size: [2]int,
+	scroll:      [2]int,
 	dragged:     bool,
 	active:      bool,
 }
@@ -69,27 +69,32 @@ Ui_Frame :: struct {
 }
 
 Ui_Context :: struct {
-	mouse_position: [2]int,
-	mouse_delta:    [2]int,
-	mouse_buttons:  [2]Ui_Button_State,
+	// Input, set by the user
+	mouse_position:       [2]int,
+	mouse_delta:          [2]int,
+	mouse_buttons:        [2]Ui_Button_State,
+	mouse_last_move_time: f32, // Seconds since mouse last moved, should be zero when mouse_delta is non-zero
 
-	using frame:    Ui_Frame,
+	// Output, read by the user
+	should_close:         bool,
+	cmds:                 [dynamic]Ui_Cmd,
 
-	cmds:           [dynamic]Ui_Cmd,
-	popups:         [dynamic]Ui_Cmd,
-	measure_text:   proc(
-		font:         Ui_Font,
-		font_size:    int,
-		text:         string,
-		user_pointer: rawptr,
-	) -> int,
-	user_pointer:   rawptr,
+	// Internal
+	using frame:          Ui_Frame,
 
-	stack:          [dynamic]Ui_Frame,
-	state:          map[u64]^Ui_State,
-	z:              int,
+	popups:               [dynamic]Ui_Cmd,
+	measure_text:         proc(
+		font:             Ui_Font,
+		font_size:        int,
+		text:             string,
+		user_pointer:     rawptr,
+	) -> f32,
+	user_pointer:         rawptr,
+	space_width:          f32,
 
-	should_close:   bool,
+	stack:                [dynamic]Ui_Frame,
+	state:                map[u64]^Ui_State,
+	z:                    int,
 }
 
 Ui_Result :: bit_set[enum {
@@ -98,8 +103,8 @@ Ui_Result :: bit_set[enum {
 	Down,
 }]
 
-UI_TEXT_HEIGHT          :: 12
-UI_PADDING              := 8
+UI_TEXT_HEIGHT          :: 10
+UI_PADDING              := 6
 UI_TEXT_PADDING         := 8
 UI_BORDER_RADIUS        := 2
 UI_BORDER_WIDTH         := 1
@@ -111,6 +116,7 @@ UI_BORDER_WIDTH         := 1
 // UI_BORDER_COLOR         :: [4]f32 { .314, .329, .357, 1, }
 
 UI_BACKGROUND_COLOR     :: [4]f32 { 0.1,  0.1,  0.1,  1, }
+UI_DARK_COLOR           :: [4]f32 { 0.15, 0.15, 0.15, 1, }
 UI_BUTTON_COLOR         :: [4]f32 { 0.2,  0.2,  0.2,  1, }
 UI_BUTTON_CLICKED_COLOR :: [4]f32 { 0.25, 0.25, 0.25, 1, }
 UI_TEXT_COLOR           :: [4]f32 { 0.7,  0.7,  0.7,  1, }
@@ -208,8 +214,20 @@ ui_rect_result :: proc(ctx: ^Ui_Context, rect: Ui_Rect) -> (result: Ui_Result) {
 	return
 }
 
+@(require_results)
+ui_toggle :: proc(ctx: ^Ui_Context, text: string, out_rect: ^Ui_Rect = nil) -> bool {
+	state := ui_state(ctx, text)
+
+	if .Clicked in ui_button(ctx, text, out_rect) {
+		state.active ~= true
+	}
+
+	return state.active
+}
+
+@(require_results)
 ui_button :: proc(ctx: ^Ui_Context, text: string, out_rect: ^Ui_Rect = nil) -> (result: Ui_Result) {
-	width  := ctx.measure_text(.Interface, UI_TEXT_HEIGHT, text, ctx.user_pointer) + UI_TEXT_PADDING * 2
+	width  := int(ctx.measure_text(.Interface, UI_TEXT_HEIGHT, text, ctx.user_pointer)) + UI_TEXT_PADDING * 2
 	height := UI_TEXT_HEIGHT + UI_TEXT_PADDING * 2
 	rect   := ui_insert_rect(ctx, { width, height, })
 	result  = ui_rect_result(ctx, rect)
@@ -249,8 +267,13 @@ ui_button :: proc(ctx: ^Ui_Context, text: string, out_rect: ^Ui_Rect = nil) -> (
 	return
 }
 
-ui_label :: proc(ctx: ^Ui_Context, text: string, out_rect: ^Ui_Rect = nil) -> (result: Ui_Result) {
-	width  := ctx.measure_text(.Interface, UI_TEXT_HEIGHT, text, ctx.user_pointer) + UI_TEXT_PADDING * 2
+ui_label :: proc(
+	ctx:      ^Ui_Context,
+	text:     string,
+	color:    [4]f32   = UI_BUTTON_COLOR,
+	out_rect: ^Ui_Rect = nil,
+) -> (result: Ui_Result) {
+	width  := int(ctx.measure_text(.Interface, UI_TEXT_HEIGHT, text, ctx.user_pointer)) + UI_TEXT_PADDING * 2
 	height := UI_TEXT_HEIGHT + UI_TEXT_PADDING * 2
 	rect   := ui_insert_rect(ctx, { width, height, })
 	result  = ui_rect_result(ctx, rect)
@@ -259,7 +282,7 @@ ui_label :: proc(ctx: ^Ui_Context, text: string, out_rect: ^Ui_Rect = nil) -> (r
 		out_rect^ = rect
 	}
 
-	ui_draw_rect(ctx, rect, UI_BUTTON_COLOR, {
+	ui_draw_rect(ctx, rect, color, {
 		color  = UI_BORDER_COLOR,
 		radius = UI_BORDER_RADIUS,
 	})
@@ -286,12 +309,21 @@ ui_draw_rect :: proc(ctx: ^Ui_Context, rect: Ui_Rect, color: [4]f32, border: Ui_
 	})
 }
 
-ui_draw_text :: proc(ctx: ^Ui_Context, text: string, position: [2]int, color: [4]f32) {
+ui_draw_text :: proc(
+	ctx:       ^Ui_Context,
+	text:      string,
+	position:  [2]int,
+	color:     [4]f32,
+	font:      Ui_Font = .Interface,
+	font_size: int     = UI_TEXT_HEIGHT,
+) {
 	append(&ctx.cmds, Ui_Cmd_Text {
 		position = position,
 		text     = text,
 		color    = color,
 		z        = ctx.z,
+		font      = font,
+		font_size = font_size,
 	})
 }
 
@@ -392,7 +424,8 @@ _ui_section :: proc(ctx: ^Ui_Context, id: string, direction: Ui_Direction, flags
 			if rect_contains(rect_inflate(separator_rect, 4), ctx.mouse_position) {
 				separator_color = { 0.55, 0.55, 0.55, 1, }
 				if ctx.mouse_buttons[0] == .Just_Clicked {
-					state.dragged = true
+					state.dragged     = true
+					state.manual_size = la.max(state.manual_size, state.size)
 				}
 			}
 		}
@@ -473,117 +506,4 @@ ui_popup_end :: proc(ctx: ^Ui_Context, text: string, show: bool) {
 	frame    := pop(&ctx.stack)
 	ctx.frame = frame
 	ctx.z    -= 1
-}
-
-debugger_ui :: proc(ctx: ^Ui_Context) {
-	clear(&ctx.cmds)
-	clear(&ctx.popups)
-	ctx.min  = UI_PADDING
-	ctx.max -= UI_PADDING
-
-	CLOSE_COLOR    :: [4]f32{ .878, .42,  .455, 1, }
-	MAXIMIZE_COLOR :: [4]f32{ .596, .765, .475, 1, }
-	MINIMIZE_COLOR :: [4]f32{ .898, .753, .478, 1, }
-
-	if ui_section(ctx, "Menu Bar", .Down, { .Separator, }) {
-		ctx.direction = .Right
-		if ui_popup_toggle(ctx, "File") {
-			ui_button(ctx, "Open")
-			ui_button(ctx, "Save")
-			ui_button(ctx, "Close")
-		}
-		if ui_popup_toggle(ctx, "Edit") {
-			ui_button(ctx, "Undo")
-			ui_button(ctx, "Redo")
-		}
-		if ui_popup_toggle(ctx, "Settings") {
-			ui_slider :: proc(ctx: ^Ui_Context, name: string, value: ^int) {
-				if ui_section(ctx, name, .Down, {}) {
-					ctx.direction = .Right
-					if .Clicked in ui_color_button(ctx, UI_TEXT_HEIGHT + UI_TEXT_PADDING * 2, MAXIMIZE_COLOR, { radius = UI_BORDER_RADIUS}) {
-						value^ += 1
-					}
-					if .Clicked in ui_color_button(ctx, UI_TEXT_HEIGHT + UI_TEXT_PADDING * 2, CLOSE_COLOR,    { radius = UI_BORDER_RADIUS}) {
-						value^ -= 1
-					}
-					ui_button(ctx, name)
-				}
-			}
-
-			ui_slider(ctx, "Padding",       &UI_PADDING)
-			ui_slider(ctx, "Text Padding",  &UI_TEXT_PADDING)
-			ui_slider(ctx, "Border Radius", &UI_BORDER_RADIUS)
-			ui_slider(ctx, "Border Width",  &UI_BORDER_WIDTH)
-		}
-
-		if ui_popup_toggle(ctx, "Run") {
-			ui_button(ctx, "Run")
-			ui_button(ctx, "Start")
-		}
-
-		if ui_popup_toggle(ctx, "Help") {
-			ui_label(ctx, "Skill issue")
-		}
-
-		ctx.direction = .Left
-		size := UI_TEXT_HEIGHT + UI_TEXT_PADDING * 2
-		if .Clicked in ui_color_button(ctx, size, CLOSE_COLOR,    { radius = UI_BORDER_RADIUS, }) {
-			ctx.should_close = true
-		}
-		if .Clicked in ui_color_button(ctx, size, MAXIMIZE_COLOR, { radius = UI_BORDER_RADIUS, }) {
-			
-		}
-		if .Clicked in ui_color_button(ctx, size, MINIMIZE_COLOR, { radius = UI_BORDER_RADIUS, }) {
-			
-		}
-	}
-
-	if ui_section(ctx, "Footer", .Up, { .Separator, }) {
-		ctx.direction = .Right
-		ui_label(ctx, fmt.tprint("Padding:",       UI_PADDING))
-		ui_label(ctx, fmt.tprint("Text Padding:",  UI_TEXT_PADDING))
-		ui_label(ctx, fmt.tprint("Border Radius:", UI_BORDER_RADIUS))
-		ui_label(ctx, fmt.tprint("Border Width:",  UI_BORDER_WIDTH))
-	}
-
-	if ui_section(ctx, "File Tree", .Right, { .Separator, .Resizeable, }) {
-		ui_button(ctx, "Files")
-	}
-
-	if ui_section(ctx, "Info Section", .Left, { .Separator, .Resizeable, }) {
-		ui_button(ctx, "Registers")
-		ui_label(ctx, "...")
-		ui_button(ctx, "Callstack")
-		ui_label(ctx, "...")
-		ui_button(ctx, "Memory")
-		ui_label(ctx, "...")
-	}
-
-	if ui_section(ctx, "Output", .Up, { .Separator, .Resizeable, }) {
-		ui_button(ctx, "output")
-	}
-
-	ui_draw_rect(ctx, {
-		{ ctx.max.x - 10, ctx.min.y, },
-		{ ctx.max.x,      ctx.max.y, },
-	}, UI_BUTTON_COLOR, {
-		radius = 5,
-	})
-	size   := 400
-	offset := 0
-	ui_draw_rect(ctx, {
-		{ ctx.max.x - 7, ctx.min.y + 3 + offset,        },
-		{ ctx.max.x - 3, ctx.min.y + 3 + offset + size, },
-	}, UI_BORDER_COLOR, {
-		radius = 2,
-	})
-
-	text      := "Hello World"
-	ctx.min.y += UI_TEXT_HEIGHT
-	max_width := 0
-	for line in strings.split_lines_iterator(&text) {
-		ui_draw_text(ctx, line, ctx.min, UI_TEXT_COLOR)
-		max_width  = max(max_width, ctx.measure_text(.Interface, UI_TEXT_HEIGHT, line, ctx.user_pointer))
-		ctx.min.y += UI_TEXT_HEIGHT * 2
-	}
 }

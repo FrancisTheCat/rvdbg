@@ -8,7 +8,6 @@ import "core:math/rand"
 import "core:strings"
 import "core:terminal/ansi"
 import "core:time"
-import "core:mem/virtual"
 import "core:unicode/utf8"
 
 unicode_text_width :: proc(str: string) -> (width: int) {
@@ -189,70 +188,6 @@ main :: proc() {
 		strings.write_byte(&source_builder, b)
 	}
 	source := strings.to_string(source_builder)
-
-	sections, relocations, labels, errors := parse_assembly(source)
-	linker_errors := resolve_relocations(sections, labels, relocations)
-
-	mem, err := virtual.reserve_and_commit(1 << 32 + 3)
-	assert(err == nil)
-
-	for section in sections {
-		#partial switch section.type {
-		case .Text:
-			print_disassembly(section, assemble_instructions(section.data.?), source, syntax_highlighting = true)
-		case .Data, .Rodata:
-			print_disassembly(section, {}, source)
-		}
-	}
-
-	start_label, start_label_found := labels["_start"]
-	if !start_label_found {
-		fmt.println("No `_start` label found, starting at PC = 0")
-	}
-
-	error: bool
-	for e in errors {
-		switch e.severity {
-		case .Error:
-			fmt.print(ansi.CSI + ansi.FG_RED + ansi.SGR)
-			error = true
-		case .Warning:
-			fmt.print(ansi.CSI + ansi.FG_YELLOW + ansi.SGR)
-		}
-		fmt.printfln("%d: %s", e.line, e.message)
-		fmt.print(ansi.CSI + ansi.RESET + ansi.SGR)
-	}
-
-	for e in linker_errors {
-		switch e.severity {
-		case .Error:
-			fmt.print(ansi.CSI + ansi.FG_RED + ansi.SGR)
-			error = true
-		case .Warning:
-			fmt.print(ansi.CSI + ansi.FG_YELLOW + ansi.SGR)
-		}
-		fmt.printfln("%d: %s", e.line, e.message)
-		fmt.print(ansi.CSI + ansi.RESET + ansi.SGR)
-	}
-
-	if error {
-		return
-	}
-
-	cpu: CPU
-	cpu_init(&cpu, mem, sections, os.stream_from_handle(os.stdout), start_label)
-
-	state := CPU_State.Running
-	fmt.println()
-	fmt.println("Output:")
-	fmt.println("--------------------" + ansi.CSI + ansi.BG_BLACK + ansi.SGR)
-	for state == .Running {
-		state = execute_instruction(&cpu)
-	}
-	fmt.println(ansi.CSI + ansi.RESET + ansi.SGR + " \n--------------------")
-	fmt.printfln("%#8x: %v", cpu.pc, state)
-
-	// fmt.printfln("%x", mem[0x800:][:100])
 
 	window(source)
 }
