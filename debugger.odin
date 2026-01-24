@@ -19,6 +19,7 @@ import stbtt "vendor:stb/truetype"
 CLEAR_COLOR :: UI_BACKGROUND_COLOR
 
 window_x, window_y: i32
+scroll_x, scroll_y: f64
 
 window :: proc(source: string) {
 	sections, relocations, labels, errors := parse_assembly(source)
@@ -79,6 +80,10 @@ window :: proc(source: string) {
 
 	glfw.SetWindowSizeCallback(window, proc "c" (window: glfw.WindowHandle, x, y: i32) {
 		window_x, window_y = x, y
+	})
+
+	glfw.SetScrollCallback(window, proc "c" (window: glfw.WindowHandle, dx, dy: f64) {
+		scroll_x, scroll_y = dx, dy
 	})
 
 	glodin.init_glfw(window)
@@ -164,6 +169,13 @@ window :: proc(source: string) {
 		mouse_position       := [2]int{ int(x), int(y), }
 		ui_ctx.mouse_delta    = mouse_position - ui_ctx.mouse_position
 		ui_ctx.mouse_position = mouse_position
+
+		ui_ctx.mouse_scroll = {
+			int(scroll_x),
+			int(scroll_y),
+		}
+
+		scroll_x, scroll_y = 0, 0
 
 		for &button, i in ui_ctx.mouse_buttons {
 			pressed := glfw.GetMouseButton(window, i32(i)) == glfw.PRESS
@@ -380,25 +392,11 @@ debugger_ui :: proc(ctx: ^Ui_Context, debugger: ^Debugger) {
 				return str[:n]
 			}
 
-			ui_text :: proc(ctx: ^Ui_Context, text: string, color: [4]f32, font: Ui_Font = .Interface, font_size := UI_TEXT_HEIGHT) {
-				width := ctx.measure_text(.Interface, UI_TEXT_HEIGHT, text, ctx.user_pointer)
-				ui_draw_text(ctx, text, ctx.min + [2]int{ 0, UI_TEXT_PADDING + UI_TEXT_HEIGHT, }, color, .Monospace)
-				ctx.extents.max = la.max(
-					ctx.extents.max,
-					[2]int {
-						ctx.min.x + int(width),
-						ctx.min.y + UI_TEXT_PADDING * 2 + UI_TEXT_HEIGHT,
-					},
-				)
-				ctx.min.y += UI_TEXT_PADDING * 2 + UI_TEXT_HEIGHT
-			}
-
 			_ = ui_button(ctx, "Output")
 			ui_draw_rect(ctx, ctx.rect, UI_DARK_COLOR, { radius = UI_BORDER_RADIUS, })
-			ctx.min.x += UI_TEXT_PADDING
 			str := strings.to_string(debugger.output_buffer)
 			for len(str) != 0 {
-				line := string_wrap(ctx, &str, ctx.max.x - ctx.min.x - UI_TEXT_PADDING, .Interface, UI_TEXT_HEIGHT)
+				line := string_wrap(ctx, &str, ctx.max.x - ctx.min.x - UI_TEXT_PADDING * 2, .Interface, UI_TEXT_HEIGHT)
 				if len(line) == 0 {
 					break
 				}
@@ -407,12 +405,17 @@ debugger_ui :: proc(ctx: ^Ui_Context, debugger: ^Debugger) {
 		}
 	}
 
-	instructions := []u32 {
-		0xfff50513,
-		0xfff60513,
-		0xfff70513,
-		0x00100137,
-		0x00012083,
+	ui_text :: proc(ctx: ^Ui_Context, text: string, color: [4]f32, font: Ui_Font = .Interface, font_size := UI_TEXT_HEIGHT) {
+		width := ctx.measure_text(.Interface, UI_TEXT_HEIGHT, text, ctx.user_pointer)
+		ui_draw_text(ctx, text, ctx.min + [2]int{ UI_TEXT_PADDING, UI_TEXT_PADDING + UI_TEXT_HEIGHT, }, color, .Monospace)
+		ctx.extents.max = la.max(
+			ctx.extents.max,
+			[2]int {
+				ctx.min.x + int(width),
+				ctx.min.y + UI_TEXT_PADDING * 2 + UI_TEXT_HEIGHT,
+			},
+		)
+		ctx.min.y += UI_TEXT_PADDING * 2 + UI_TEXT_HEIGHT
 	}
 
 	ctx.space_width = ctx.measure_text(.Interface, UI_TEXT_HEIGHT, " ", ctx.user_pointer)
@@ -489,7 +492,21 @@ debugger_ui :: proc(ctx: ^Ui_Context, debugger: ^Debugger) {
 		}
 	}
 
-	for inst, i in instructions {
-		ui_instruction(ctx, disassemble_instruction(inst) or_continue, i, i == 2)
+	@(static)
+	focused_address: u32
+	if focused_address == 0 {
+		focused_address = debugger.cpu.pc
+	}
+
+	focused_address -= u32(ctx.mouse_scroll.y * 4)
+	instructions    := slice.reinterpret([]u32, debugger.cpu.mem[focused_address:])[:8]
+
+	for &inst, i in instructions {
+		disassembled, ok := disassemble_instruction(inst)
+		if !ok {
+			ui_text(ctx, "---", CLOSE_COLOR)
+			continue
+		}
+		ui_instruction(ctx, disassembled, i, (^u8)(&inst) == &debugger.cpu.mem[debugger.cpu.pc])
 	}
 }
