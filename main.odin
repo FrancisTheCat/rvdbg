@@ -167,8 +167,8 @@ print_disassembly :: proc(
 }
 
 main :: proc() {
-	source_bytes, ok := os.read_entire_file(os.args[1])
-	assert(ok)
+	source_bytes, err := os.read_entire_file(os.args[1], context.allocator)
+	assert(err == nil)
 	source_builder: strings.Builder
 	line_len: int
 	for b in source_bytes {

@@ -3,7 +3,7 @@ package rvdbg
 import     "core:fmt"
 import glm "core:math/linalg/glsl"
 import la  "core:math/linalg"
-import os  "core:os/os2"
+import     "core:os"
 import     "core:reflect"
 import     "core:slice"
 import     "core:strings"
@@ -12,6 +12,7 @@ import     "core:terminal/ansi"
 import     "core:unicode/utf8"
 
 import "glodin"
+import "input"
 
 import       "vendor:glfw"
 import stbtt "vendor:stb/truetype"
@@ -78,13 +79,7 @@ window :: proc(source: string) {
 	assert(bool(ok), "glfw.Init")
 	window := glfw.CreateWindow(900, 600, "", nil, nil)
 
-	glfw.SetWindowSizeCallback(window, proc "c" (window: glfw.WindowHandle, x, y: i32) {
-		window_x, window_y = x, y
-	})
-
-	glfw.SetScrollCallback(window, proc "c" (window: glfw.WindowHandle, dx, dy: f64) {
-		scroll_x, scroll_y = dx, dy
-	})
+	input.init(window)
 
 	glodin.init_glfw(window)
 	defer glodin.uninit()
@@ -342,6 +337,8 @@ debugger_ui :: proc(ctx: ^Ui_Context, debugger: ^Debugger) {
 		}
 	}
 
+	// if input.get_key_down()
+
 	if ui_section(ctx, "Footer", .Up, { .Separator, }) {
 		ctx.direction = .Left
 		ui_label(ctx, fmt.tprintf("Status: %v", debugger.state))
@@ -501,12 +498,12 @@ debugger_ui :: proc(ctx: ^Ui_Context, debugger: ^Debugger) {
 	focused_address -= u32(ctx.mouse_scroll.y * 4)
 	instructions    := slice.reinterpret([]u32, debugger.cpu.mem[focused_address:])[:8]
 
-	for &inst, i in instructions {
+	for &inst, i in instructions[:min(len(instructions), 100)] {
 		disassembled, ok := disassemble_instruction(inst)
 		if !ok {
 			ui_text(ctx, "---", CLOSE_COLOR)
 			continue
 		}
-		ui_instruction(ctx, disassembled, i, (^u8)(&inst) == &debugger.cpu.mem[debugger.cpu.pc])
+		ui_instruction(ctx, disassembled, i, (^u8)(&inst) == &debugger.cpu.mem[debugger.cpu.pc], true)
 	}
 }
