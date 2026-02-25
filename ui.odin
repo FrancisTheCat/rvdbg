@@ -5,6 +5,9 @@ import "base:intrinsics"
 import "core:hash"
 import la "core:math/linalg"
 
+// In Seconds
+HOVER_THRESHOLD :: 0.5
+
 Ui_Rect :: struct {
 	min, max: [2]int,
 }
@@ -51,8 +54,10 @@ Ui_State :: struct {
 	size:        [2]int,
 	manual_size: [2]int,
 	scroll:      [2]int,
+	position:    [2]int,
 	dragged:     bool,
 	active:      bool,
+	last_shown:  int,
 }
 
 Ui_Direction :: enum {
@@ -215,9 +220,10 @@ Ui_Context :: struct {
 	mouse_delta:          [2]int,
 	mouse_scroll:         [2]int,
 	mouse_buttons:        [2]Ui_Button_State,
-	mouse_last_move_time: f32, // Seconds since mouse last moved, should be zero when mouse_delta is non-zero
 	keys_pressed:         Ui_Key_Set,
 	keys_down:            Ui_Key_Set,
+	current_time:         f64,
+	delta_time:           f64,
 
 	// Output, read by the user
 	should_close:         bool,
@@ -235,6 +241,8 @@ Ui_Context :: struct {
 	) -> f32,
 	user_pointer:         rawptr,
 	space_width:          f32,
+	mouse_last_move_time: f64,
+	frame_id:             int,
 
 	stack:                [dynamic]Ui_Frame,
 	state:                map[u64]^Ui_State,
@@ -245,12 +253,13 @@ Ui_Result :: bit_set[enum {
 	Hovered,
 	Clicked,
 	Down,
+	Tooltip,
 }]
 
-UI_TEXT_HEIGHT          :: 10
-UI_PADDING              := 6
-UI_TEXT_PADDING         := 8
-UI_BORDER_RADIUS        := 2
+UI_TEXT_HEIGHT          :: 9
+UI_PADDING              := 4
+UI_TEXT_PADDING         := 6
+UI_BORDER_RADIUS        :: 2
 UI_BORDER_WIDTH         := 1
 
 // UI_BACKGROUND_COLOR     :: [4]f32 { .118, .129, .157, 1, }
@@ -335,9 +344,9 @@ ui_insert_rect :: proc(ctx: ^Ui_Context, size: [2]int) -> (rect: Ui_Rect) {
 	case .Up:
 		ctx.max.y -= size.y + UI_PADDING
 	case .Right:
-		ctx.min.x += size.x  + UI_PADDING
+		ctx.min.x += size.x + UI_PADDING
 	case .Left:
-		ctx.max.x -= size.x  + UI_PADDING
+		ctx.max.x -= size.x + UI_PADDING
 	}
 
 	ctx.extents.max = la.max(ctx.extents.max, rect.max)
@@ -414,22 +423,24 @@ ui_button :: proc(ctx: ^Ui_Context, text: string, out_rect: ^Ui_Rect = nil) -> (
 ui_label :: proc(
 	ctx:      ^Ui_Context,
 	text:     string,
-	color:    [4]f32   = UI_BUTTON_COLOR,
-	out_rect: ^Ui_Rect = nil,
+	color:    [4]f32    = UI_BUTTON_COLOR,
+	border:   Ui_Border = { radius = UI_BORDER_RADIUS, },
+	out_rect: ^Ui_Rect  = nil,
 ) -> (result: Ui_Result) {
 	width  := int(ctx.measure_text(.Interface, UI_TEXT_HEIGHT, text, ctx.user_pointer)) + UI_TEXT_PADDING * 2
 	height := UI_TEXT_HEIGHT + UI_TEXT_PADDING * 2
 	rect   := ui_insert_rect(ctx, { width, height, })
 	result  = ui_rect_result(ctx, rect)
 
+	if .Hovered in result && ctx.current_time - ctx.mouse_last_move_time > HOVER_THRESHOLD {
+		result |= { .Tooltip, }
+	}
+
 	if out_rect != nil {
 		out_rect^ = rect
 	}
 
-	ui_draw_rect(ctx, rect, color, {
-		color  = UI_BORDER_COLOR,
-		radius = UI_BORDER_RADIUS,
-	})
+	ui_draw_rect(ctx, rect, color, border)
 	ui_draw_text(ctx, text, {
 		rect.min.x + UI_TEXT_PADDING,
 		rect.min.y + UI_TEXT_PADDING + UI_TEXT_HEIGHT,
@@ -531,8 +542,8 @@ _ui_section :: proc(ctx: ^Ui_Context, id: string, direction: Ui_Direction, flags
 		frame.rect.max.x -= size.x + UI_PADDING
 		if .Separator in flags {
 			separator_rect = {
-				min = { frame.rect.max.x,                   frame.rect.min.y, },
-				max = { frame.rect.max.x + UI_BORDER_WIDTH, frame.rect.max.y, },
+				min = { frame.rect.max.x - UI_BORDER_WIDTH, frame.rect.min.y, },
+				max = { frame.rect.max.x,                   frame.rect.max.y, },
 			}
 			frame.rect.max.x -= UI_PADDING + UI_BORDER_WIDTH
 		}
@@ -595,6 +606,32 @@ ui_section_end :: proc(ctx: ^Ui_Context, id: string, direction: Ui_Direction, fl
 		la.min(ctx.extents.min, extents.min),
 		la.max(ctx.extents.max, extents.max),
 	}
+}
+
+@(require_results, deferred_in_out = ui_popup_end)
+ui_tooltip_popup :: proc(ctx: ^Ui_Context, id: string) -> bool {
+	state := ui_state(ctx, id)
+	if state.last_shown != ctx.frame_id - 1 { // if this wasn't shown last frame move it to the cursor
+		state.position = ctx.mouse_position + { 0, 10, }
+	}
+
+	rect: Ui_Rect = { min = state.position, }
+	rect.max = rect.min + state.size + UI_PADDING * 2
+
+	append(&ctx.stack, ctx.frame)
+
+	ctx.z += 1
+	ui_draw_rect(ctx, rect, { 0.15, 0.15, 0.15, 1, }, {
+		radius = UI_BORDER_RADIUS,
+		width  = UI_BORDER_WIDTH,
+		color  = { 0.2, 0.2, 0.2, 1, },
+	})
+	rect.min      += UI_PADDING
+	rect.max      -= UI_PADDING
+	ctx.frame.rect = rect
+	ctx.extents    = { rect.min, rect.min, }
+	ctx.direction  = .Down
+	return true
 }
 
 @(require_results, deferred_in_out = ui_popup_end)

@@ -321,6 +321,7 @@ Instruction_Args :: struct {
 Instruction :: struct {
 	mnemonic:   Mnemonic,
 	using args: Instruction_Args,
+	type:       Instruction_Type,
 
 	line:       int,
 }
@@ -1416,6 +1417,7 @@ disassemble_instruction :: proc(data: u32) -> (inst: Instruction, ok: bool) {
 		if cond {
 			inst.mnemonic = m
 			info          = &i
+			inst.type     = i.type
 			break
 		}
 	}

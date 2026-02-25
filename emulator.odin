@@ -6,10 +6,12 @@ import "core:io"
 import "core:slice"
 
 CPU :: struct {
-	registers: [Register]u32,
-	mem:       []byte    `fmt:"-"`,
-	pc:        u32       `fmt:"x"`,
-	stdout:    io.Writer `fmt:"-"`,
+	registers:         [Register]u32,
+	mem:               []byte    `fmt:"-"`,
+	pc:                u32       `fmt:"x"`,
+	stdout:            io.Writer `fmt:"-"`,
+	registers_written: bit_set[Register],
+	registers_read:    bit_set[Register],
 }
 
 CPU_State :: enum {
@@ -47,6 +49,27 @@ execute_instruction :: proc(cpu: ^CPU) -> CPU_State {
 	cpu.pc += 4
 
 	defer cpu.registers[.Zero] = 0
+
+	switch inst.type {
+	case .R, .B:
+		cpu.registers_read    = { inst.rs1, inst.rs2, }
+		cpu.registers_written = { inst.rd, }
+	case .S:
+		cpu.registers_read    = { inst.rs1, inst.rs2, }
+		cpu.registers_written = {}
+	case .I:
+		cpu.registers_read    = { inst.rs1, }
+		cpu.registers_written = { inst.rd, }
+	case .U, .J:
+		cpu.registers_read    = {}
+		cpu.registers_written = { inst.rd, }
+	case .T:
+		cpu.registers_read    = { inst.rs1, }
+		cpu.registers_written = { inst.rd, }
+	case .E:
+		cpu.registers_read    = {}
+		cpu.registers_written = {}
+	}
 
 	store_address: u32
 	store_size:    u32

@@ -4,13 +4,14 @@ import     "core:fmt"
 import glm "core:math/linalg/glsl"
 import la  "core:math/linalg"
 import     "core:os"
+import rb  "core:container/rbtree"
 import     "core:reflect"
 import     "core:slice"
 import     "core:strings"
-import     "core:mem/virtual"
+import     "core:time"
 import     "core:terminal/ansi"
 import     "core:unicode/utf8"
-import rb  "core:container/rbtree"
+import     "core:mem/virtual"
 
 import "glodin"
 import "input"
@@ -159,6 +160,8 @@ window :: proc(source: string) {
 
 	instance_buffer: [dynamic]Instance_Data
 
+	start_time := time.now()
+
 	for !glfw.WindowShouldClose(window) && !ui_ctx.should_close {
 		if debugger.reset {
 			virtual.release(raw_data(mem), len(mem))
@@ -178,6 +181,10 @@ window :: proc(source: string) {
 		ui_ctx.mouse_delta    = mouse_position - ui_ctx.mouse_position
 		ui_ctx.mouse_position = mouse_position
 		ui_ctx.mouse_scroll   = la.array_cast(input.get_scroll(), int)
+
+		current_time       := time.duration_seconds(time.since(start_time))
+		ui_ctx.delta_time   = current_time - ui_ctx.current_time
+		ui_ctx.current_time = current_time
 
 		for &button, i in ui_ctx.mouse_buttons {
 			pressed := input.get_mouse_button(i32(i))
@@ -307,6 +314,10 @@ Debugger :: struct {
 }
 
 debugger_ui :: proc(ctx: ^Ui_Context, debugger: ^Debugger) {
+	if ctx.mouse_delta != 0 {
+		ctx.mouse_last_move_time = ctx.current_time
+	}
+	ctx.frame_id += 1
 	clear(&ctx.cmds)
 	clear(&ctx.popups)
 	ctx.min  = UI_PADDING
@@ -345,10 +356,9 @@ debugger_ui :: proc(ctx: ^Ui_Context, debugger: ^Debugger) {
 				}
 			}
 
-			ui_slider(ctx, "Padding",       &UI_PADDING)
-			ui_slider(ctx, "Text Padding",  &UI_TEXT_PADDING)
-			ui_slider(ctx, "Border Radius", &UI_BORDER_RADIUS)
-			ui_slider(ctx, "Border Width",  &UI_BORDER_WIDTH)
+			ui_slider(ctx, "Padding",      &UI_PADDING)
+			ui_slider(ctx, "Text Padding", &UI_TEXT_PADDING)
+			ui_slider(ctx, "Border Width", &UI_BORDER_WIDTH)
 			if .Clicked in ui_button(ctx, "Register Names") {
 				debugger.register_names ~= true
 			}
@@ -412,7 +422,23 @@ debugger_ui :: proc(ctx: ^Ui_Context, debugger: ^Debugger) {
 				ui_section(ctx, fmt.tprintf("Registers_%d", i), .Down, {}) or_continue
 				ctx.direction = .Right
 				for j in 0 ..< 4 {
-					ui_label(ctx, fmt.tprintf("0x%08x", debugger.cpu.registers[Register(i * 4 + j)]))
+					register := Register(i * 4 + j)
+					border: Ui_Border = {
+						radius = UI_BORDER_RADIUS,
+					}
+					if register in debugger.cpu.registers_read {
+						border.color = { .384, .675, .933, 1, }
+						border.width = UI_BORDER_WIDTH
+					}
+					if register in debugger.cpu.registers_written {
+						border.color = CLOSE_COLOR
+						border.width = UI_BORDER_WIDTH
+					}
+					if .Tooltip in ui_label(ctx, fmt.tprintf("0x%08x", debugger.cpu.registers[register]), border = border) {
+						if ui_tooltip_popup(ctx, fmt.tprintf("Tooltip_Registers_%d", register)) {
+							ui_label(ctx, strings.to_lower(reflect.enum_name_from_value(register) or_else "---", context.temp_allocator))
+						}
+					}
 				}
 			}
 		}
@@ -508,13 +534,13 @@ debugger_ui :: proc(ctx: ^Ui_Context, debugger: ^Debugger) {
 		active:      bool,
 	) {
 		ui_text :: proc(ctx: ^Ui_Context, text: string, color: [4]f32, font: Ui_Font = .Interface, font_size := UI_TEXT_HEIGHT) {
-			width := int(ctx.measure_text(.Interface, UI_TEXT_HEIGHT, text, ctx.user_pointer))
-			ui_draw_text(ctx, text, ctx.min + UI_TEXT_PADDING + [2]int{ 0, UI_TEXT_HEIGHT, }, color, .Monospace)
+			width := int(ctx.measure_text(font, font_size, text, ctx.user_pointer))
+			ui_draw_text(ctx, text, ctx.min + UI_TEXT_PADDING + [2]int{ 0, font_size, }, color, .Monospace)
 			ctx.extents.max = la.max(
 				ctx.extents.max,
 				[2]int {
 					ctx.min.x + UI_TEXT_PADDING * 2 + width,
-					ctx.min.y + UI_TEXT_PADDING * 2 + UI_TEXT_HEIGHT,
+					ctx.min.y + UI_TEXT_PADDING * 2 + font_size,
 				},
 			)
 			ctx.min.x += width
@@ -529,7 +555,8 @@ debugger_ui :: proc(ctx: ^Ui_Context, debugger: ^Debugger) {
 		border_color:     [4]f32
 		border_width:     int
 
-		background_rect := Ui_Rect { ctx.min, ctx.min + state.size, }
+		background_rect      := Ui_Rect { ctx.min, ctx.min + state.size, }
+		background_rect.max.x = ctx.max.x
 		if rect_contains(background_rect, ctx.mouse_position) {
 			background_color = UI_BUTTON_CLICKED_COLOR
 
