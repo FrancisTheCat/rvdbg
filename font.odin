@@ -20,10 +20,11 @@ Font :: struct {
 }
 
 draw_string :: proc(
-	font:     Font,
-	str:      string,
-	position: glm.vec2,
-	color:    [4]f32,
+	instance_buffer: ^[dynamic]Instance_Data,
+	font:            Font,
+	str:             string,
+	position:        glm.vec2,
+	color:           [4]f32,
 ) {
 	position := position
 
@@ -50,7 +51,7 @@ draw_string :: proc(
 			true,
 		)
 
-		append(&instance_buffer, Instance_Data {
+		append(instance_buffer, Instance_Data {
 			rect        = { quad.x0, quad.y0, quad.x1, quad.y1, },
 			tex_rect    = { quad.s0, quad.t0, quad.s1, quad.t1, },
 			color       = color,

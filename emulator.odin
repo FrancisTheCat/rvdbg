@@ -17,6 +17,8 @@ CPU_State :: enum {
 	Ebreak,
 	Invalid_Instruction,
 	Trivial_Loop,
+
+	Debugger_Breakpoint,
 }
 
 cpu_init :: proc(cpu: ^CPU, mem: []byte, sections: []Section, stdout: io.Writer, entry_point: Location) {

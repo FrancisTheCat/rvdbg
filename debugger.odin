@@ -10,6 +10,7 @@ import     "core:strings"
 import     "core:mem/virtual"
 import     "core:terminal/ansi"
 import     "core:unicode/utf8"
+import rb  "core:container/rbtree"
 
 import "glodin"
 import "input"
@@ -20,7 +21,6 @@ import stbtt "vendor:stb/truetype"
 CLEAR_COLOR :: UI_BACKGROUND_COLOR
 
 window_x, window_y: i32
-scroll_x, scroll_y: f64
 
 window :: proc(source: string) {
 	sections, relocations, labels, errors := parse_assembly(source)
@@ -74,6 +74,10 @@ window :: proc(source: string) {
 
 	debugger: Debugger
 	cpu_init(&debugger.cpu, mem, sections, strings.to_writer(&debugger.output_buffer), start_label)
+
+	rb.init(&debugger.breakpoints)
+	debugger.focused_address = debugger.cpu.pc
+	debugger.register_names  = true
 
 	ok := glfw.Init();
 	assert(bool(ok), "glfw.Init")
@@ -153,27 +157,30 @@ window :: proc(source: string) {
 	quad := glodin.create_mesh(vertex_buffer[:])
 	defer glodin.destroy_mesh(quad)
 
+	instance_buffer: [dynamic]Instance_Data
+
 	for !glfw.WindowShouldClose(window) && !ui_ctx.should_close {
-		glodin.clear_color(0, CLEAR_COLOR)
+		if debugger.reset {
+			virtual.release(raw_data(mem), len(mem))
+			mem, err = virtual.reserve_and_commit(len(mem))
+			assert(err == nil)
+
+			cpu_init(&debugger.cpu, mem, sections, strings.to_writer(&debugger.output_buffer), start_label)
+			strings.builder_reset(&debugger.output_buffer)
+			debugger.reset = false
+		}
 
 		w, h        := glfw.GetFramebufferSize(window)
 		ui_ctx.max.x = int(w)
 		ui_ctx.max.y = int(h)
 
-		x, y                 := glfw.GetCursorPos(window)
-		mouse_position       := [2]int{ int(x), int(y), }
+		mouse_position       := la.array_cast(input.get_mouse_position(), int)
 		ui_ctx.mouse_delta    = mouse_position - ui_ctx.mouse_position
 		ui_ctx.mouse_position = mouse_position
-
-		ui_ctx.mouse_scroll = {
-			int(scroll_x),
-			int(scroll_y),
-		}
-
-		scroll_x, scroll_y = 0, 0
+		ui_ctx.mouse_scroll   = la.array_cast(input.get_scroll(), int)
 
 		for &button, i in ui_ctx.mouse_buttons {
-			pressed := glfw.GetMouseButton(window, i32(i)) == glfw.PRESS
+			pressed := input.get_mouse_button(i32(i))
 			if pressed {
 				if button == .None {
 					button = .Just_Clicked
@@ -185,7 +192,30 @@ window :: proc(source: string) {
 			}
 		}
 
+		ui_ctx.keys_pressed = {}
+		ui_ctx.keys_down    = {}
+		for key, state in input.keys {
+			keys: ^Ui_Key_Set
+			#partial switch state {
+			case .Just_Pressed:
+				keys = &ui_ctx.keys_pressed
+			case .Pressed:
+				keys = &ui_ctx.keys_down
+			case:
+				continue
+			}
+
+			#partial switch key {
+			case .Key_0 ..= .Key_9:
+				keys^ |= { ._0 + Ui_Key(key - .Key_0), }
+			case .F1 ..= .F24:
+				keys^ |= { .F1 + Ui_Key(key - .F1), }
+			}
+		}
+
 		debugger_ui(&ui_ctx, &debugger)
+
+		glodin.clear_color(0, CLEAR_COLOR)
 
 		glodin.set_uniforms(program, {
 			{ "u_window_size", glm.vec2{ f32(w), f32(h), }, },
@@ -212,7 +242,13 @@ window :: proc(source: string) {
 		for cmd in ui_ctx.cmds {
 			switch cmd in cmd {
 			case Ui_Cmd_Text:
-				draw_string(fonts[.Interface], cmd.text, { f32(cmd.position.x), f32(cmd.position.y), }, cmd.color)
+				draw_string(
+					&instance_buffer,
+					fonts[.Interface],
+					cmd.text,
+					{ f32(cmd.position.x), f32(cmd.position.y), },
+					cmd.color,
+				)
 			case Ui_Cmd_Rect:
 				rect := cmd.rect
 				append(&instance_buffer, Instance_Data {
@@ -233,11 +269,10 @@ window :: proc(source: string) {
 
 		glfw.SwapBuffers(window)
 
+		input.poll()
 		glfw.PollEvents()
 	}
 }
-
-instance_buffer: [dynamic]Instance_Data
 
 Instance_Data :: struct {
 	rect, tex_rect:      glm.vec4,
@@ -261,10 +296,14 @@ Vertex_2D :: struct {
 }
 
 Debugger :: struct {
-	cpu:           CPU,
-	state:         CPU_State,
-	output_buffer: strings.Builder,
-	running:       bool,
+	cpu:             CPU,
+	state:           CPU_State,
+	output_buffer:   strings.Builder,
+	running:         bool,
+	breakpoints:     rb.Tree(u32, bool),
+	focused_address: u32,
+	register_names:  bool,
+	reset:           bool,
 }
 
 debugger_ui :: proc(ctx: ^Ui_Context, debugger: ^Debugger) {
@@ -273,9 +312,13 @@ debugger_ui :: proc(ctx: ^Ui_Context, debugger: ^Debugger) {
 	ctx.min  = UI_PADDING
 	ctx.max -= UI_PADDING
 
+	BREAK_COLOR    :: [4]f32{ .5,   .3,   .3,   1, }
 	CLOSE_COLOR    :: [4]f32{ .878, .42,  .455, 1, }
 	MAXIMIZE_COLOR :: [4]f32{ .596, .765, .475, 1, }
 	MINIMIZE_COLOR :: [4]f32{ .898, .753, .478, 1, }
+
+	step := .F10 in ctx.keys_pressed
+	run  := .F5  in ctx.keys_pressed
 
 	if ui_section(ctx, "Menu Bar", .Down, { .Separator, }) {
 		ctx.direction = .Right
@@ -306,17 +349,20 @@ debugger_ui :: proc(ctx: ^Ui_Context, debugger: ^Debugger) {
 			ui_slider(ctx, "Text Padding",  &UI_TEXT_PADDING)
 			ui_slider(ctx, "Border Radius", &UI_BORDER_RADIUS)
 			ui_slider(ctx, "Border Width",  &UI_BORDER_WIDTH)
+			if .Clicked in ui_button(ctx, "Register Names") {
+				debugger.register_names ~= true
+			}
 		}
 
 		if ui_popup_toggle(ctx, "Run") {
 			if .Clicked in ui_button(ctx, "Run") {
-				for debugger.state == .Running {
-					debugger.state = execute_instruction(&debugger.cpu)
-				}
+				run = true
 			}
-			_ = ui_button(ctx, "Start")
 			if .Clicked in ui_button(ctx, "Step") {
-				debugger.state = execute_instruction(&debugger.cpu)
+				step = true
+			}
+			if .Clicked in ui_button(ctx, "Reset") {
+				debugger.reset = true
 			}
 		}
 
@@ -330,19 +376,33 @@ debugger_ui :: proc(ctx: ^Ui_Context, debugger: ^Debugger) {
 			ctx.should_close = true
 		}
 		if .Clicked in ui_color_button(ctx, size, MAXIMIZE_COLOR, { radius = UI_BORDER_RADIUS, }) {
-			
+			unimplemented()
 		}
 		if .Clicked in ui_color_button(ctx, size, MINIMIZE_COLOR, { radius = UI_BORDER_RADIUS, }) {
-			
+			unimplemented()
 		}
 	}
 
-	// if input.get_key_down()
+	if run {
+		debugger.state = .Running
+		for debugger.state == .Running {
+			debugger.state = execute_instruction(&debugger.cpu)
+			if node := rb.find(debugger.breakpoints, debugger.cpu.pc); node != nil && node.value {
+				debugger.state = .Debugger_Breakpoint
+				break
+			}
+		}
+	}
+	if step {
+		debugger.state = execute_instruction(&debugger.cpu)
+	}
 
 	if ui_section(ctx, "Footer", .Up, { .Separator, }) {
 		ctx.direction = .Left
 		ui_label(ctx, fmt.tprintf("Status: %v", debugger.state))
-		ui_label(ctx, fmt.tprintf("PC: 0x%08x", debugger.cpu.pc))
+		if .Clicked in ui_button(ctx, fmt.tprintf("PC: 0x%08x", debugger.cpu.pc)) {
+			debugger.focused_address = debugger.cpu.pc
+		}
 	}
 
 	if ui_section(ctx, "Info Section", .Left, { .Separator, .Resizeable, }) {
@@ -365,8 +425,31 @@ debugger_ui :: proc(ctx: ^Ui_Context, debugger: ^Debugger) {
 		}
 
 		if ui_toggle(ctx, "Memory") {
-			_ = ui_section(ctx, "Memroy_Section", .Down, { .Separator, })
+			_ = ui_section(ctx, "Memory_Section", .Down, { .Separator, })
 			ui_label(ctx, "...")
+		}
+
+		if ui_toggle(ctx, "Breakpoints") {
+			_ = ui_section(ctx, "Breakpoints_Section", .Down, { .Separator, })
+			iterator := rb.iterator(&debugger.breakpoints, .Forward)
+			for node in rb.iterator_next(&iterator) {
+				address :=  node.key
+				enabled := &node.value
+
+				ui_section(ctx, fmt.tprintf("Breakpoint_%x", address), .Down, {}) or_continue
+				ctx.direction = .Right
+
+				color := enabled^ ? MAXIMIZE_COLOR : CLOSE_COLOR
+				if .Clicked in ui_color_button(ctx, UI_TEXT_HEIGHT + UI_TEXT_PADDING * 2, color, border = { radius = UI_BORDER_RADIUS, }) {
+					enabled^ ~= true
+				}
+				if .Clicked in ui_button(ctx, fmt.tprintf("0x%08x", address)) {
+					debugger.focused_address = address
+				}
+				if .Clicked in ui_color_button(ctx, UI_TEXT_HEIGHT + UI_TEXT_PADDING * 2, CLOSE_COLOR, border = { radius = UI_BORDER_RADIUS, }) {
+					rb.remove(&debugger.breakpoints, address)
+				}
+			}
 		}
 	}
 
@@ -417,7 +500,13 @@ debugger_ui :: proc(ctx: ^Ui_Context, debugger: ^Debugger) {
 
 	ctx.space_width = ctx.measure_text(.Interface, UI_TEXT_HEIGHT, " ", ctx.user_pointer)
 
-	ui_instruction :: proc(ctx: ^Ui_Context, instruction: Instruction, id: int, active: bool, register_names := false) {
+	ui_instruction :: proc(
+		ctx:         ^Ui_Context,
+		debugger:    ^Debugger,
+		instruction: Instruction,
+		address:     u32,
+		active:      bool,
+	) {
 		ui_text :: proc(ctx: ^Ui_Context, text: string, color: [4]f32, font: Ui_Font = .Interface, font_size := UI_TEXT_HEIGHT) {
 			width := int(ctx.measure_text(.Interface, UI_TEXT_HEIGHT, text, ctx.user_pointer))
 			ui_draw_text(ctx, text, ctx.min + UI_TEXT_PADDING + [2]int{ 0, UI_TEXT_HEIGHT, }, color, .Monospace)
@@ -431,20 +520,45 @@ debugger_ui :: proc(ctx: ^Ui_Context, debugger: ^Debugger) {
 			ctx.min.x += width
 		}
 
-		id_str := fmt.tprint("Instruction_", id)
+		id_str := fmt.tprint("Instruction_", address)
 		state  := ui_state(ctx, id_str)^
 		_       = ui_section(ctx, id_str, .Down, {})
+		node   := rb.find(debugger.breakpoints, address)
 
 		background_color: [4]f32
+		border_color:     [4]f32
+		border_width:     int
+
 		background_rect := Ui_Rect { ctx.min, ctx.min + state.size, }
 		if rect_contains(background_rect, ctx.mouse_position) {
 			background_color = UI_BUTTON_CLICKED_COLOR
+
+			if ctx.mouse_buttons[0] == .Just_Clicked {
+				if node != nil {
+					node.value ~= true
+				} else {
+					rb.find_or_insert(&debugger.breakpoints, address, true)
+				}
+			}
+
+			if ctx.mouse_buttons[1] == .Just_Clicked {
+				node = nil
+				rb.remove(&debugger.breakpoints, address)
+			}
 		} else if active {
 			background_color = UI_BUTTON_COLOR
 		}
-		if background_color != 0 {
-			ui_draw_rect(ctx, background_rect, background_color, { radius = UI_BORDER_RADIUS, })
+
+		if node != nil {
+			if node.value {
+				border_color = CLOSE_COLOR
+			} else {
+				border_color = BREAK_COLOR
+			}
+			border_width = UI_BORDER_WIDTH
 		}
+
+		ui_draw_rect(ctx, background_rect, background_color, { radius = UI_BORDER_RADIUS, color = border_color, width = border_width, })
 
 		info   := instruction_infos[instruction.mnemonic]
 		offset := false
@@ -475,7 +589,7 @@ debugger_ui :: proc(ctx: ^Ui_Context, debugger: ^Debugger) {
 			}
 
 			if reg, ok := reg.?; ok {
-				if register_names {
+				if debugger.register_names {
 					ui_text(ctx, strings.to_lower(reflect.enum_name_from_value(reg) or_else panic("")), UI_TEXT_COLOR)
 				} else {
 					ui_text(ctx, fmt.tprintf("x%d", int(reg)), UI_TEXT_COLOR)
@@ -489,21 +603,24 @@ debugger_ui :: proc(ctx: ^Ui_Context, debugger: ^Debugger) {
 		}
 	}
 
-	@(static)
-	focused_address: u32
-	if focused_address == 0 {
-		focused_address = debugger.cpu.pc
-	}
+	debugger.focused_address -= u32(ctx.mouse_scroll.y * 4)
+	instruction_height       := UI_TEXT_HEIGHT + UI_PADDING + UI_TEXT_PADDING * 2
+	visible_instructions     := max((ctx.max.y - ctx.min.y) / instruction_height, 0)
+	instructions             := slice.reinterpret([]u32, debugger.cpu.mem[debugger.focused_address:])[:visible_instructions]
 
-	focused_address -= u32(ctx.mouse_scroll.y * 4)
-	instructions    := slice.reinterpret([]u32, debugger.cpu.mem[focused_address:])[:8]
-
-	for &inst, i in instructions[:min(len(instructions), 100)] {
+	for inst, i in instructions {
 		disassembled, ok := disassemble_instruction(inst)
 		if !ok {
 			ui_text(ctx, "---", CLOSE_COLOR)
 			continue
 		}
-		ui_instruction(ctx, disassembled, i, (^u8)(&inst) == &debugger.cpu.mem[debugger.cpu.pc], true)
+		address := debugger.focused_address + u32(i) * 4
+		ui_instruction(
+			ctx,
+			debugger,
+			disassembled,
+			debugger.focused_address + u32(i) * 4,
+			address == debugger.cpu.pc,
+		)
 	}
 }
