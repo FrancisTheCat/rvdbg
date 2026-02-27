@@ -12,6 +12,7 @@ CPU :: struct {
 	stdout:            io.Writer `fmt:"-"`,
 	registers_written: bit_set[Register],
 	registers_read:    bit_set[Register],
+	last_instruction:  Instruction,
 }
 
 CPU_State :: enum {
@@ -46,7 +47,8 @@ execute_instruction :: proc(cpu: ^CPU) -> CPU_State {
 	if !ok {
 		return .Invalid_Instruction
 	}
-	cpu.pc += 4
+	cpu.last_instruction = inst
+	cpu.pc              += 4
 
 	defer cpu.registers[.Zero] = 0
 

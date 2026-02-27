@@ -4,6 +4,7 @@ import "base:intrinsics"
 
 import "core:hash"
 import la "core:math/linalg"
+import "core:strings"
 
 // In Seconds
 HOVER_THRESHOLD :: 0.5
@@ -75,20 +76,20 @@ Ui_Frame :: struct {
 
 Ui_Key :: enum {
 	/** Printable keys **/
-	Space          = ' ',
-	Apostrophe     = '\'', 
-	Comma          = ',',
-	Minus          = '-',
-	Period         = '.',
-	Slash          = '/',
-	Semicolon      = ';',
-	Equal          = '=',
-	Left_Bracket   = '[',
-	Backslash      = '\\',
-	Right_Bracket  = ']',
-	Grave_Accent   = '`',
-	Backspace      = '\b',
-	
+	Space,
+	Apostrophe,
+	Comma,
+	Minus,
+	Period,
+	Slash,
+	Semicolon,
+	Equal,
+	Left_Bracket,
+	Backslash,
+	Right_Bracket,
+	Grave_Accent,
+	Backspace,
+
 	/* Alphanumeric characters */
 	_0,//             = 48 + 0,
 	_1,//             = _0 + 1,
@@ -212,6 +213,113 @@ Ui_Key :: enum {
 	Menu,
 }
 
+ui_key_to_text :: proc(key: Ui_Key) -> string {
+	#partial switch key {
+	case .Space:
+		return " "
+	case .Apostrophe:
+		return "'"
+	case .Comma:
+		return ","
+	case .Minus:
+		return "-"
+	case .Period:
+		return "."
+	case .Slash:
+		return "/"
+	case .Semicolon:
+		return ";"
+	case .Equal:
+		return "="
+	case .Left_Bracket:
+		return "["
+	case .Backslash:
+		return "\\"
+	case .Right_Bracket:
+		return "]"
+	case .Grave_Accent:
+		return "`"
+	case .Backspace:
+		return "<backspace>"
+
+	case ._0:
+		return "0"
+	case ._1:
+		return "1"
+	case ._2:
+		return "2"
+	case ._3:
+		return "3"
+	case ._4:
+		return "4"
+	case ._5:
+		return "5"
+	case ._6:
+		return "6"
+	case ._7:
+		return "7"
+	case ._8:
+		return "8"
+	case ._9:
+		return "9"
+
+	case .A:
+		return "a"
+	case .B:
+		return "b"
+	case .C:
+		return "c"
+	case .D:
+		return "d"
+	case .E:
+		return "e"
+	case .F:
+		return "f"
+	case .G:
+		return "g"
+	case .H:
+		return "h"
+	case .I:
+		return "i"
+	case .J:
+		return "j"
+	case .K:
+		return "k"
+	case .L:
+		return "l"
+	case .M:
+		return "m"
+	case .N:
+		return "n"
+	case .O:
+		return "o"
+	case .P:
+		return "p"
+	case .Q:
+		return "q"
+	case .R:
+		return "r"
+	case .S:
+		return "s"
+	case .T:
+		return "t"
+	case .U:
+		return "u"
+	case .V:
+		return "v"
+	case .W:
+		return "w"
+	case .X:
+		return "x"
+	case .Y:
+		return "y"
+	case .Z:
+		return "z"
+	}
+
+	return ""
+}
+
 Ui_Key_Set :: bit_set[Ui_Key]
 
 Ui_Context :: struct {
@@ -243,6 +351,7 @@ Ui_Context :: struct {
 	space_width:          f32,
 	mouse_last_move_time: f64,
 	frame_id:             int,
+	active_id:            u64,
 
 	stack:                [dynamic]Ui_Frame,
 	state:                map[u64]^Ui_State,
@@ -254,12 +363,13 @@ Ui_Result :: bit_set[enum {
 	Clicked,
 	Down,
 	Tooltip,
+	Submit,
 }]
 
 UI_TEXT_HEIGHT          :: 9
+UI_BORDER_RADIUS        :: 2
 UI_PADDING              := 4
 UI_TEXT_PADDING         := 6
-UI_BORDER_RADIUS        :: 2
 UI_BORDER_WIDTH         := 1
 
 // UI_BACKGROUND_COLOR     :: [4]f32 { .118, .129, .157, 1, }
@@ -299,22 +409,35 @@ rect_union :: proc(a, b: Ui_Rect) -> Ui_Rect {
 	}
 }
 
+ui_saturate_hash :: proc(h: u64) -> u64 {
+	if h == 0 {
+		return 1
+	} else {
+		return h
+	}
+}
+
 ui_hash_string :: proc(str: string) -> u64 {
-	return hash.fnv64a(transmute([]byte)str)
+	return ui_saturate_hash(hash.fnv64a(transmute([]byte)str))
 }
 
 ui_hash_int :: proc(val: $T) -> u64 where intrinsics.type_is_integer(T) {
-	return u64(val)
+	return ui_saturate_hash(u64(val))
+}
+
+ui_hash_pointer :: proc(val: $T) -> u64 where intrinsics.type_is_pointer(T) {
+	return ui_saturate_hash(u64(uintptr(val)))
 }
 
 ui_hash :: proc {
 	ui_hash_int,
+	ui_hash_pointer,
 	ui_hash_string,
 }
 
 ui_state :: proc(ctx: ^Ui_Context, id_source: $T) -> (state: ^Ui_State) {
 	hash           := ui_hash(id_source)
-	state           = ctx.state[hash] or_else new(Ui_State)
+	state           = ctx.state[hash] or_else new(Ui_State) // TODO: should go onto an arena
 	ctx.state[hash] = state
 	return state
 }
@@ -337,7 +460,7 @@ ui_insert_rect :: proc(ctx: ^Ui_Context, size: [2]int) -> (rect: Ui_Rect) {
 			max = ctx.rect.max,
 		}
 	}
-	
+
 	switch ctx.direction {
 	case .Down:
 		ctx.min.y += size.y + UI_PADDING
@@ -351,6 +474,15 @@ ui_insert_rect :: proc(ctx: ^Ui_Context, size: [2]int) -> (rect: Ui_Rect) {
 
 	ctx.extents.max = la.max(ctx.extents.max, rect.max)
 	ctx.extents.min = la.min(ctx.extents.min, rect.min)
+
+	if ctx.direction == .Down || ctx.direction == .Up {
+		rect.max.x = max(rect.max.x, ctx.max.x)
+	}
+
+	if ctx.direction == .Left || ctx.direction == .Right {
+		rect.max.y = max(rect.max.y, ctx.max.y)
+	}
+
 	return
 }
 
@@ -371,7 +503,7 @@ ui_rect_result :: proc(ctx: ^Ui_Context, rect: Ui_Rect) -> (result: Ui_Result) {
 ui_toggle :: proc(ctx: ^Ui_Context, text: string, out_rect: ^Ui_Rect = nil) -> bool {
 	state := ui_state(ctx, text)
 
-	if .Clicked in ui_button(ctx, text, out_rect) {
+	if .Clicked in ui_button(ctx, text, out_rect = out_rect) {
 		state.active ~= true
 	}
 
@@ -379,14 +511,62 @@ ui_toggle :: proc(ctx: ^Ui_Context, text: string, out_rect: ^Ui_Rect = nil) -> b
 }
 
 @(require_results)
-ui_button :: proc(ctx: ^Ui_Context, text: string, out_rect: ^Ui_Rect = nil) -> (result: Ui_Result) {
+ui_button :: proc(
+	ctx:      ^Ui_Context,
+	text:     string,
+	border:   Ui_Border = {
+		radius = UI_BORDER_RADIUS,
+	},
+	out_rect: ^Ui_Rect = nil,
+) -> (result: Ui_Result) {
 	width  := int(ctx.measure_text(.Interface, UI_TEXT_HEIGHT, text, ctx.user_pointer)) + UI_TEXT_PADDING * 2
 	height := UI_TEXT_HEIGHT + UI_TEXT_PADDING * 2
 	rect   := ui_insert_rect(ctx, { width, height, })
 	result  = ui_rect_result(ctx, rect)
 
-	if ctx.direction == .Down {
-		rect.max.x = ctx.max.x
+	if out_rect != nil {
+		out_rect^ = rect
+	}
+
+	border := border
+	color  := UI_BUTTON_COLOR
+	if rect_contains(rect, ctx.mouse_position) {
+		result      |= { .Hovered, }
+		border.width = UI_BORDER_WIDTH
+		border.color = UI_BORDER_COLOR
+		#partial switch ctx.mouse_buttons[0] {
+		case .Just_Clicked:
+			result |= { .Clicked, }
+			color   = UI_BUTTON_CLICKED_COLOR
+		case .Clicked:
+			color  = UI_BUTTON_CLICKED_COLOR
+		}
+	}
+
+	ui_draw_rect(ctx, rect, color, border)
+	ui_draw_text(ctx, text, {
+		rect.min.x + UI_TEXT_PADDING,
+		rect.min.y + UI_TEXT_PADDING + UI_TEXT_HEIGHT,
+	}, UI_TEXT_COLOR)
+
+	return
+}
+
+@(require_results)
+ui_textbox :: proc(
+	ctx:          ^Ui_Context,
+	text:         ^strings.Builder,
+	initial_text: string   = "",
+	out_rect:     ^Ui_Rect = nil,
+) -> (result: Ui_Result) {
+	width := int(ctx.measure_text(.Interface, UI_TEXT_HEIGHT, strings.to_string(text^), ctx.user_pointer)) + UI_TEXT_PADDING * 2
+	rect  := ui_insert_rect(ctx, { width, UI_TEXT_HEIGHT + UI_TEXT_PADDING * 2, })
+	result = ui_rect_result(ctx, rect)
+	id    := ui_hash(text)
+
+	if id not_in ctx.state {
+		strings.write_string(text, initial_text)
+		ctx.state[id] = nil
 	}
 
 	if out_rect != nil {
@@ -402,8 +582,28 @@ ui_button :: proc(ctx: ^Ui_Context, text: string, out_rect: ^Ui_Rect = nil) -> (
 		case .Just_Clicked:
 			result |= { .Clicked, }
 			color   = UI_BUTTON_CLICKED_COLOR
+
+			ctx.active_id = id
 		case .Clicked:
-			color  = UI_BUTTON_CLICKED_COLOR
+			color = UI_BUTTON_CLICKED_COLOR
+		}
+	}
+
+	if ctx.active_id == id {
+		color        = UI_BACKGROUND_COLOR
+		border_width = UI_BORDER_WIDTH
+		for key in ctx.keys_pressed {
+			#partial switch key {
+			case .Backspace:
+				strings.pop_rune(text)
+			case .Escape:
+				ctx.active_id = 0
+			case .Enter:
+				ctx.active_id = 0
+				result       |= { .Submit, }
+			case:
+				strings.write_string(text, ui_key_to_text(key))
+			}
 		}
 	}
 
@@ -412,7 +612,7 @@ ui_button :: proc(ctx: ^Ui_Context, text: string, out_rect: ^Ui_Rect = nil) -> (
 		width  = border_width,
 		radius = UI_BORDER_RADIUS,
 	})
-	ui_draw_text(ctx, text, {
+	ui_draw_text(ctx, strings.to_string(text^), {
 		rect.min.x + UI_TEXT_PADDING,
 		rect.min.y + UI_TEXT_PADDING + UI_TEXT_HEIGHT,
 	}, UI_TEXT_COLOR)
@@ -427,10 +627,9 @@ ui_label :: proc(
 	border:   Ui_Border = { radius = UI_BORDER_RADIUS, },
 	out_rect: ^Ui_Rect  = nil,
 ) -> (result: Ui_Result) {
-	width  := int(ctx.measure_text(.Interface, UI_TEXT_HEIGHT, text, ctx.user_pointer)) + UI_TEXT_PADDING * 2
-	height := UI_TEXT_HEIGHT + UI_TEXT_PADDING * 2
-	rect   := ui_insert_rect(ctx, { width, height, })
-	result  = ui_rect_result(ctx, rect)
+	width := int(ctx.measure_text(.Interface, UI_TEXT_HEIGHT, text, ctx.user_pointer)) + UI_TEXT_PADDING * 2
+	rect  := ui_insert_rect(ctx, { width, UI_TEXT_HEIGHT + UI_TEXT_PADDING * 2, })
+	result = ui_rect_result(ctx, rect)
 
 	if .Hovered in result && ctx.current_time - ctx.mouse_last_move_time > HOVER_THRESHOLD {
 		result |= { .Tooltip, }
@@ -612,7 +811,7 @@ ui_section_end :: proc(ctx: ^Ui_Context, id: string, direction: Ui_Direction, fl
 ui_tooltip_popup :: proc(ctx: ^Ui_Context, id: string) -> bool {
 	state := ui_state(ctx, id)
 	if state.last_shown != ctx.frame_id - 1 { // if this wasn't shown last frame move it to the cursor
-		state.position = ctx.mouse_position + { 0, 10, }
+		state.position = ctx.mouse_position + { 0, 15, }
 	}
 
 	rect: Ui_Rect = { min = state.position, }

@@ -1,5 +1,7 @@
 package rvdbg
 
+import "base:intrinsics"
+
 import     "core:fmt"
 import glm "core:math/linalg/glsl"
 import la  "core:math/linalg"
@@ -7,6 +9,7 @@ import     "core:os"
 import rb  "core:container/rbtree"
 import     "core:reflect"
 import     "core:slice"
+import     "core:strconv"
 import     "core:strings"
 import     "core:time"
 import     "core:terminal/ansi"
@@ -212,12 +215,34 @@ window :: proc(source: string) {
 				continue
 			}
 
+			k: Ui_Key
 			#partial switch key {
 			case .Key_0 ..= .Key_9:
-				keys^ |= { ._0 + Ui_Key(key - .Key_0), }
+				k = ._0 + Ui_Key(key - .Key_0)
 			case .F1 ..= .F24:
-				keys^ |= { .F1 + Ui_Key(key - .F1), }
+				k = .F1 + Ui_Key(key - .F1)
+			case .A ..= .Z:
+				k = .A  + Ui_Key(key - .A)
+			case .Space:         k = .Space
+			case .Apostrophe:    k = .Apostrophe
+			case .Comma:         k = .Comma
+			case .Minus:         k = .Minus
+			case .Period:        k = .Period
+			case .Slash:         k = .Slash
+			case .Semicolon:     k = .Semicolon
+			case .Equal:         k = .Equal
+			case .Left_Bracket:  k = .Left_Bracket
+			case .Backslash:     k = .Backslash
+			case .Right_Bracket: k = .Right_Bracket
+			case .Grave_Accent:  k = .Grave_Accent
+			case .Backspace:     k = .Backspace
+			case .Escape:        k = .Escape
+			case .Enter:         k = .Enter
+			case:
+				continue
 			}
+
+			keys^ |= { k, }
 		}
 
 		debugger_ui(&ui_ctx, &debugger)
@@ -270,7 +295,7 @@ window :: proc(source: string) {
 		mesh := glodin.create_instanced_mesh(quad, instance_buffer[:])
 		defer glodin.destroy(mesh)
 
-		glodin.draw(0, program, mesh)
+		glodin.draw({}, program, mesh)
 
 		clear(&instance_buffer)
 
@@ -311,6 +336,11 @@ Debugger :: struct {
 	focused_address: u32,
 	register_names:  bool,
 	reset:           bool,
+	memory_view:     struct {
+		input:   strings.Builder,
+		address: u32,
+	},
+	last_error:      string,
 }
 
 debugger_ui :: proc(ctx: ^Ui_Context, debugger: ^Debugger) {
@@ -322,6 +352,9 @@ debugger_ui :: proc(ctx: ^Ui_Context, debugger: ^Debugger) {
 	clear(&ctx.popups)
 	ctx.min  = UI_PADDING
 	ctx.max -= UI_PADDING
+	if ctx.mouse_buttons[0] == .Just_Clicked {
+		ctx.active_id = 0
+	}
 
 	BREAK_COLOR    :: [4]f32{ .5,   .3,   .3,   1, }
 	CLOSE_COLOR    :: [4]f32{ .878, .42,  .455, 1, }
@@ -393,18 +426,21 @@ debugger_ui :: proc(ctx: ^Ui_Context, debugger: ^Debugger) {
 		}
 	}
 
+	debugger_execute_instruction :: proc(debugger: ^Debugger) {
+		debugger.state = execute_instruction(&debugger.cpu)
+		if node := rb.find(debugger.breakpoints, debugger.cpu.pc); node != nil && node.value {
+			debugger.state = .Debugger_Breakpoint
+		}
+	}
+
 	if run {
 		debugger.state = .Running
 		for debugger.state == .Running {
-			debugger.state = execute_instruction(&debugger.cpu)
-			if node := rb.find(debugger.breakpoints, debugger.cpu.pc); node != nil && node.value {
-				debugger.state = .Debugger_Breakpoint
-				break
-			}
+			debugger_execute_instruction(debugger)
 		}
 	}
 	if step {
-		debugger.state = execute_instruction(&debugger.cpu)
+		debugger_execute_instruction(debugger)
 	}
 
 	if ui_section(ctx, "Footer", .Up, { .Separator, }) {
@@ -412,6 +448,16 @@ debugger_ui :: proc(ctx: ^Ui_Context, debugger: ^Debugger) {
 		ui_label(ctx, fmt.tprintf("Status: %v", debugger.state))
 		if .Clicked in ui_button(ctx, fmt.tprintf("PC: 0x%08x", debugger.cpu.pc)) {
 			debugger.focused_address = debugger.cpu.pc
+		}
+		ctx.direction = .Right
+		if debugger.last_error != "" {
+			if .Clicked in ui_button(ctx, debugger.last_error, border = {
+				radius = UI_BORDER_RADIUS,
+				width  = UI_BORDER_WIDTH,
+				color  = CLOSE_COLOR,
+			}) {
+				debugger.last_error = ""
+			}
 		}
 	}
 
@@ -443,16 +489,20 @@ debugger_ui :: proc(ctx: ^Ui_Context, debugger: ^Debugger) {
 			}
 		}
 
-		if ui_toggle(ctx, "Callstack") {
-			_ = ui_section(ctx, "Callstack_Section", .Down, { .Separator, })
-			for i in 0 ..< 4 {
-				_ = ui_button(ctx, fmt.tprintf("0x%08x", i))
-			}
-		}
-
 		if ui_toggle(ctx, "Memory") {
 			_ = ui_section(ctx, "Memory_Section", .Down, { .Separator, })
-			ui_label(ctx, "...")
+
+			if .Submit in ui_textbox(ctx, &debugger.memory_view.input, "0x") {
+				address, ok := strconv.parse_u64(strings.to_string(debugger.memory_view.input))
+				if !ok && address < 1 << 32 {
+					debugger.last_error = "Failed to parse memory address"
+				} else {
+					debugger.memory_view.address = u32(address)
+				}
+			}
+
+			value := &debugger.cpu.mem[debugger.memory_view.address]
+			ui_label(ctx, fmt.tprintf("0x%08x", intrinsics.unaligned_load((^u32)(value))))
 		}
 
 		if ui_toggle(ctx, "Breakpoints") {
@@ -635,6 +685,7 @@ debugger_ui :: proc(ctx: ^Ui_Context, debugger: ^Debugger) {
 	visible_instructions     := max((ctx.max.y - ctx.min.y) / instruction_height, 0)
 	instructions             := slice.reinterpret([]u32, debugger.cpu.mem[debugger.focused_address:])[:visible_instructions]
 
+	pc_visible: bool
 	for inst, i in instructions {
 		disassembled, ok := disassemble_instruction(inst)
 		if !ok {
@@ -649,5 +700,11 @@ debugger_ui :: proc(ctx: ^Ui_Context, debugger: ^Debugger) {
 			debugger.focused_address + u32(i) * 4,
 			address == debugger.cpu.pc,
 		)
+
+		pc_visible ||= address == debugger.cpu.pc
+	}
+
+	if !pc_visible && step {
+		debugger.focused_address = debugger.cpu.pc
 	}
 }
