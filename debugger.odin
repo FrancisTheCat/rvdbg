@@ -2,18 +2,18 @@ package rvdbg
 
 import "base:intrinsics"
 
-import     "core:fmt"
-import glm "core:math/linalg/glsl"
-import la  "core:math/linalg"
-import     "core:os"
 import rb  "core:container/rbtree"
-import     "core:reflect"
+import     "core:fmt"
+import la  "core:math/linalg"
+import glm "core:math/linalg/glsl"
+import     "core:mem"
+import     "core:mem/virtual"
+import     "core:os"
 import     "core:slice"
 import     "core:strings"
-import     "core:time"
 import     "core:terminal/ansi"
+import     "core:time"
 import     "core:unicode/utf8"
-import     "core:mem/virtual"
 
 import "glodin"
 import "input"
@@ -21,11 +21,23 @@ import "input"
 import       "vendor:glfw"
 import stbtt "vendor:stb/truetype"
 
-window_x, window_y: i32
-
 window :: proc(source: string) {
-	sections, relocations, labels, errors := parse_assembly(source)
-	linker_errors := resolve_relocations(sections, labels, relocations)
+	when ODIN_DEBUG {
+		track: mem.Tracking_Allocator
+		mem.tracking_allocator_init(&track, context.allocator)
+		defer mem.tracking_allocator_destroy(&track)
+		context.allocator = mem.tracking_allocator(&track)
+
+		defer for _, leak in track.allocation_map {
+			fmt.printf("%v leaked %m\n", leak.location, leak.size)
+		}
+		defer for bad in track.bad_free_array {
+			fmt.printf("bad free: %v", bad.location)
+		}
+	}
+	
+	sections, relocations, labels, errors := parse_assembly(source, context.temp_allocator, context.temp_allocator)
+	linker_errors := resolve_relocations(sections, labels, relocations, context.temp_allocator)
 
 	mem, err := virtual.reserve_and_commit(1 << 32 + 3)
 	assert(err == nil)
@@ -33,7 +45,7 @@ window :: proc(source: string) {
 	for section in sections {
 		#partial switch section.type {
 		case .Text:
-			print_disassembly(section, assemble_instructions(section.data.?), source, syntax_highlighting = true)
+			print_disassembly(section, assemble_instructions(section.data.?, context.temp_allocator), source, syntax_highlighting = true)
 		case .Data, .Rodata:
 			print_disassembly(section, {}, source)
 		}
@@ -76,9 +88,18 @@ window :: proc(source: string) {
 	debugger: Debugger
 	cpu_init(&debugger.cpu, mem, sections, strings.to_writer(&debugger.output_buffer), start_label)
 
-	rb.init(&debugger.breakpoints)
 	debugger.focused_address = debugger.cpu.pc
 	debugger.register_names  = true
+
+	rb.init(&debugger.breakpoints)
+
+	defer {
+		strings.builder_destroy(&debugger.output_buffer)
+		strings.builder_destroy(&debugger.memory_view.input)
+		watch_window_destroy(&debugger.watch_window)
+		rb.destroy(&debugger.breakpoints)
+		delete(debugger.last_error)
+	}
 
 	ok := glfw.Init();
 	assert(bool(ok), "glfw.Init")
@@ -94,9 +115,8 @@ window :: proc(source: string) {
 
 	CLEAR_COLOR :: UI_DEFAULT_THEME.colors[.Background]
 
-	window_x, window_y = 900, 600
-	glodin.clear_color(0, CLEAR_COLOR)
 	glodin.window_size_callback(900, 600)
+	glodin.clear_color(0, CLEAR_COLOR)
 
 	program := glodin.create_program_file("vertex.glsl", "fragment.glsl") or_else panic("Failed to compile program")
 	defer glodin.destroy(program)
@@ -117,19 +137,24 @@ window :: proc(source: string) {
 	glodin.enable(.Blend)
 
 	ui_ctx: Ui_Context
-	ui_ctx.measure_text = proc(font: Ui_Font, font_size: int, text: string, user_pointer: rawptr) -> f32 {
-		return measure_text((^[Ui_Font]Font)(user_pointer)[font], text)
-	}
-	ui_ctx.user_pointer = &fonts
-	ui_ctx.theme        = UI_DEFAULT_THEME
+	ui_context_init(
+		&ui_ctx,
+		proc(font: Ui_Font, font_size: int, text: string, user_pointer: rawptr) -> f32 {
+			return measure_text((^[Ui_Font]Font)(user_pointer)[font], text)
+		},
+		&fonts,
+	)
+	defer ui_context_destroy(&ui_ctx)
 
 	quad := glodin.create_mesh(vertex_buffer[:])
 	defer glodin.destroy_mesh(quad)
 
-	instance_buffer: [dynamic]Instance_Data
+	instance_buffer := make([dynamic]Instance_Data, context.allocator)
+	defer delete(instance_buffer)
 
 	start_time := time.now()
 
+	prev_time: f64
 	prev_mouse_position: [2]int
 	prev_text_height := -1
 
@@ -189,21 +214,16 @@ window :: proc(source: string) {
 			prev_text_height = ui_ctx.theme.text_height
 		}
 
-		w, h        := glfw.GetFramebufferSize(window)
-		ui_ctx.max.x = int(w)
-		ui_ctx.max.y = int(h)
+		mouse_position     := la.array_cast(input.get_mouse_position(), int)
+		mouse_delta        := mouse_position - prev_mouse_position
+		prev_mouse_position = mouse_position
 
-		mouse_position       := la.array_cast(input.get_mouse_position(), int)
-		ui_ctx.mouse_delta    = mouse_position - prev_mouse_position
-		prev_mouse_position   = mouse_position
-		ui_ctx.mouse_position = mouse_position
-		ui_ctx.mouse_scroll   = la.array_cast(input.get_scroll(), int)
+		current_time := time.duration_seconds(time.since(start_time))
+		delta_time   := current_time - prev_time
+		prev_time     = current_time
 
-		current_time       := time.duration_seconds(time.since(start_time))
-		ui_ctx.delta_time   = current_time - ui_ctx.current_time
-		ui_ctx.current_time = current_time
-
-		for &button, i in ui_ctx.mouse_buttons {
+		mouse_buttons: [2]Ui_Button_State
+		for &button, i in mouse_buttons {
 			state := input.get_mouse_button_raw(i32(i))
 			switch state {
 			case .Not_Pressed:
@@ -217,15 +237,15 @@ window :: proc(source: string) {
 			}
 		}
 
-		ui_ctx.keys_pressed = {}
-		ui_ctx.keys_down    = {}
+		keys_pressed: Ui_Key_Set
+		keys_down:    Ui_Key_Set
 		for key, state in input.keys {
 			keys: ^Ui_Key_Set
 			#partial switch state {
 			case .Just_Pressed:
-				keys = &ui_ctx.keys_pressed
+				keys = &keys_pressed
 			case .Pressed:
-				keys = &ui_ctx.keys_down
+				keys = &keys_down
 			case:
 				continue
 			}
@@ -262,7 +282,22 @@ window :: proc(source: string) {
 			keys^ |= { k, }
 		}
 
-		ui_ctx.text_input = input.get_text_input()
+		w, h := glfw.GetFramebufferSize(window)
+
+		ui_begin_frame(
+			&ui_ctx,
+			int(w),
+			int(h),
+			mouse_position,
+			mouse_delta,
+			la.array_cast(input.get_scroll(), int),
+			mouse_buttons,
+			keys_pressed,
+			keys_down,
+			input.get_text_input(),
+			current_time,
+			delta_time,
+		)
 
 		debugger_ui(&ui_ctx, &debugger)
 
@@ -274,24 +309,7 @@ window :: proc(source: string) {
 			{ "u_atlas_monospace", fonts[.Monospace].texture,   },
 		})
 
-		slice.stable_sort_by(ui_ctx.cmds[:], proc(a, b: Ui_Cmd) -> bool {
-			za, zb: int
-			switch v in a {
-			case Ui_Cmd_Text:
-				za = v.z
-			case Ui_Cmd_Rect:
-				za = v.z
-			}
-			switch v in b {
-			case Ui_Cmd_Text:
-				zb = v.z
-			case Ui_Cmd_Rect:
-				zb = v.z
-			}
-			return za < zb
-		})
-
-		for cmd in ui_ctx.cmds {
+		for cmd in ui_get_draw_commands(ui_ctx) {
 			switch cmd in cmd {
 			case Ui_Cmd_Text:
 				draw_string(
@@ -368,8 +386,6 @@ Debugger :: struct {
 }
 
 debugger_ui :: proc(ctx: ^Ui_Context, debugger: ^Debugger) {
-	ui_begin_frame(ctx)
-
 	BREAK_COLOR    :: [4]f32{ .5,   .3,   .3,   1, }
 	CLOSE_COLOR    :: [4]f32{ .878, .42,  .455, 1, }
 	MAXIMIZE_COLOR :: [4]f32{ .596, .765, .475, 1, }
@@ -436,7 +452,7 @@ debugger_ui :: proc(ctx: ^Ui_Context, debugger: ^Debugger) {
 		}
 
 		ctx.direction = .Left
-		size := ctx.widget_height
+		size := ctx.theme.text_height + ctx.theme.text_padding * 2
 		if .Clicked in ui_color_button(ctx, size, CLOSE_COLOR) {
 			ctx.should_close = true
 		}
@@ -550,13 +566,13 @@ debugger_ui :: proc(ctx: ^Ui_Context, debugger: ^Debugger) {
 				ctx.direction = .Right
 
 				color := enabled^ ? MAXIMIZE_COLOR : CLOSE_COLOR
-				if .Clicked in ui_color_button(ctx, ctx.widget_height, color) {
+				if .Clicked in ui_color_button(ctx, ctx.theme.text_height + ctx.theme.text_padding * 2, color) {
 					enabled^ ~= true
 				}
 				if .Clicked in ui_button(ctx, fmt.tprintf("0x%08x", address), font = .Monospace) {
 					debugger.focused_address = address
 				}
-				if .Clicked in ui_color_button(ctx, ctx.widget_height, CLOSE_COLOR) {
+				if .Clicked in ui_color_button(ctx, ctx.theme.text_height + ctx.theme.text_padding * 2, CLOSE_COLOR) {
 					rb.remove(&debugger.breakpoints, address)
 				}
 			}
@@ -710,7 +726,7 @@ debugger_ui :: proc(ctx: ^Ui_Context, debugger: ^Debugger) {
 
 			if reg, ok := reg.?; ok {
 				if debugger.register_names {
-					ui_text(ctx, strings.to_lower(reflect.enum_name_from_value(reg) or_else panic("")), ctx.theme.colors[.Text])
+					ui_text(ctx, register_names[reg], ctx.theme.colors[.Text])
 				} else {
 					ui_text(ctx, fmt.tprintf("x%d", int(reg)), ctx.theme.colors[.Text])
 				}
@@ -750,4 +766,10 @@ debugger_ui :: proc(ctx: ^Ui_Context, debugger: ^Debugger) {
 	if !pc_visible && step {
 		debugger.focused_address = debugger.cpu.pc
 	}
+}
+
+debugger_set_last_error :: proc(debugger: ^Debugger, error: string) {
+	fmt.eprintln("Error:", error)
+	delete(debugger.last_error, context.allocator)
+	debugger.last_error = strings.clone(error, context.allocator)
 }

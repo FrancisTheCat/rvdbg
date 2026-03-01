@@ -575,10 +575,19 @@ parse_assembly :: proc(
 	ctx := &Parsing_Context {
 		errors          = make([dynamic]Error,       error_allocator),
 		instructions    = make([dynamic]Instruction, data_allocator),
+		sections        = make([dynamic]Section,     data_allocator),
+		relocations     = make([dynamic]Relocation,  data_allocator),
+		labels          = make(map[string]Location,  data_allocator),
 		error_allocator = error_allocator,
 		data_allocator  = data_allocator,
 	}
 	bytes.buffer_init_allocator(&ctx.data_buffer, 0, 0, ctx.data_allocator)
+
+	defer {
+		delete(ctx.constants)
+		delete(ctx.instructions)
+		delete(ctx.data_buffer.buf)
+	}
 
 	lines_loop: for line in strings.split_lines_iterator(&data) {
 		ctx.line += 1

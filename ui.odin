@@ -5,7 +5,9 @@ import "base:intrinsics"
 import "core:fmt"
 import "core:hash"
 import la "core:math/linalg"
+import "core:slice"
 import "core:strings"
+import "core:mem/virtual"
 
 UI_HOVER_THRESHOLD      :: 0.5 // In Seconds
 UI_RESIZE_MARGIN        :: 4
@@ -366,8 +368,19 @@ Ui_Theme :: struct {
 	}][4]f32,
 }
 
+Ui_Measure_Text_Proc :: #type proc(
+	font:         Ui_Font,
+	font_size:    int,
+	text:         string,
+	user_pointer: rawptr,
+) -> f32
+
 Ui_Context :: struct {
-	// Input, set by the user
+	// Output, read by the user
+	should_close:         bool,
+	cmds:                 [dynamic]Ui_Cmd,
+
+	// Input, set by ui_begin_frame
 	mouse_position:       [2]int,
 	mouse_delta:          [2]int,
 	mouse_scroll:         [2]int,
@@ -378,31 +391,22 @@ Ui_Context :: struct {
 	current_time:         f64,
 	delta_time:           f64,
 
-	// Output, read by the user
-	should_close:         bool,
-	cmds:                 [dynamic]Ui_Cmd,
-
 	// Internal
 	using frame:          Ui_Frame,
 
 	popups:               [dynamic]Ui_Cmd,
-	measure_text:         proc(
-		font:             Ui_Font,
-		font_size:        int,
-		text:             string,
-		user_pointer:     rawptr,
-	) -> f32,
+	measure_text:         Ui_Measure_Text_Proc,
 	user_pointer:         rawptr,
 	space_width:          f32,
 	mouse_last_move_time: f64,
 	frame_id:             int,
 	active_id:            u64,
-	widget_height:        int,
 
 	theme:                Ui_Theme,
 
 	stack:                [dynamic]Ui_Frame,
 	state:                map[u64]^Ui_State,
+	state_arena:          virtual.Arena,
 	z:                    int,
 }
 
@@ -459,7 +463,7 @@ ui_hash :: proc {
 
 ui_state :: proc(ctx: ^Ui_Context, id_source: $T) -> (state: ^Ui_State) {
 	hash           := ui_hash(id_source)
-	state           = ctx.state[hash] or_else new(Ui_State) // TODO: should go onto an arena
+	state           = ctx.state[hash] or_else (virtual.new(&ctx.state_arena, Ui_State) or_else panic("Failed to allocate memory for state"))
 	ctx.state[hash] = state
 	return state
 }
@@ -543,7 +547,7 @@ ui_button :: proc(
 	out_rect: ^Ui_Rect         = nil,
 ) -> (result: Ui_Result) {
 	width  := int(ctx.measure_text(font, ctx.theme.text_height, text, ctx.user_pointer)) + ctx.theme.text_padding * 2
-	rect   := ui_insert_rect(ctx, { width, ctx.widget_height, })
+	rect   := ui_insert_rect(ctx, { width, ctx.theme.text_height + ctx.theme.text_padding * 2, })
 	result  = ui_rect_result(ctx, rect)
 
 	if out_rect != nil {
@@ -584,7 +588,7 @@ ui_textbox :: proc(
 	min_size:     ^[2]int        = nil,
 ) -> (result: Ui_Result) {
 	width := int(ctx.measure_text(font, ctx.theme.text_height, strings.to_string(text^), ctx.user_pointer)) + ctx.theme.text_padding * 2
-	rect  := ui_insert_rect(ctx, { width, ctx.widget_height, })
+	rect  := ui_insert_rect(ctx, { width, ctx.theme.text_height + ctx.theme.text_padding * 2, })
 	result = ui_rect_result(ctx, rect)
 	id    := ui_hash(text)
 
@@ -596,7 +600,7 @@ ui_textbox :: proc(
 	}
 
 	if min_size != nil {
-		min_size^ = { width, ctx.widget_height, }
+		min_size^ = { width, ctx.theme.text_height + ctx.theme.text_padding * 2, }
 	}
 
 	if out_rect != nil {
@@ -659,7 +663,7 @@ ui_label :: proc(
 ) -> (result: Ui_Result) {
 	border := border.? or_else { radius = ctx.theme.border_radius, }
 	width  := int(ctx.measure_text(font, ctx.theme.text_height, text, ctx.user_pointer)) + ctx.theme.text_padding * 2
-	rect   := ui_insert_rect(ctx, { width, ctx.widget_height, })
+	rect   := ui_insert_rect(ctx, { width, ctx.theme.text_height + ctx.theme.text_padding * 2, })
 	result  = ui_rect_result(ctx, rect)
 
 	if .Hovered in result && ctx.current_time - ctx.mouse_last_move_time > UI_HOVER_THRESHOLD {
@@ -667,7 +671,7 @@ ui_label :: proc(
 	}
 
 	if min_size != nil {
-		min_size^ = { width, ctx.widget_height, }
+		min_size^ = { width, ctx.theme.text_height + ctx.theme.text_padding * 2, }
 	}
 
 	if out_rect != nil {
@@ -952,7 +956,7 @@ _ui_slider :: proc(
 	assert(max_value > min_value)
 
 	border := border.? or_else { radius = ctx.theme.border_radius, }
-	rect   := ui_insert_rect(ctx, { width, ctx.widget_height, })
+	rect   := ui_insert_rect(ctx, { width, ctx.theme.text_height + ctx.theme.text_padding * 2, })
 	result  = ui_rect_result(ctx, rect)
 	id     := ui_hash(value)
 
@@ -1014,19 +1018,92 @@ ui_slider :: proc(
 	return
 }
 
-ui_begin_frame :: proc(ctx: ^Ui_Context) {
-	if ctx.mouse_delta != 0 {
-		ctx.mouse_last_move_time = ctx.current_time
+ui_begin_frame :: proc(
+	ctx:            ^Ui_Context,
+	width, height:  int,
+	mouse_position: [2]int,
+	mouse_delta:    [2]int,
+	mouse_scroll:   [2]int,
+	mouse_buttons:  [2]Ui_Button_State,
+	keys_pressed:   Ui_Key_Set,
+	keys_down:      Ui_Key_Set,
+	text_input:     string,
+	current_time:   f64,
+	delta_time:     f64,
+) {
+	ctx.mouse_position = mouse_position
+	ctx.mouse_delta    = mouse_delta
+	ctx.mouse_scroll   = mouse_scroll
+	ctx.mouse_buttons  = mouse_buttons
+	ctx.keys_pressed   = keys_pressed
+	ctx.keys_down      = keys_down
+	ctx.text_input     = text_input
+	ctx.current_time   = current_time
+	ctx.delta_time     = delta_time
+
+	if mouse_delta != 0 {
+		ctx.mouse_last_move_time = current_time
 	}
+
 	ctx.frame_id += 1
 	clear(&ctx.cmds)
 	clear(&ctx.popups)
-	ctx.min  = ctx.theme.padding
-	ctx.max -= ctx.theme.padding
-	if ctx.mouse_buttons[0] == .Just_Clicked {
+	ctx.max.x = width
+	ctx.max.y = height
+	ctx.min   = ctx.theme.padding
+	ctx.max  -= ctx.theme.padding
+	if mouse_buttons[0] == .Just_Clicked {
 		ctx.active_id = 0
 	}
-	ctx.widget_height = ctx.theme.text_height + ctx.theme.text_padding * 2
+}
+
+ui_get_draw_commands :: proc(ctx: Ui_Context) -> []Ui_Cmd {
+	slice.stable_sort_by(ctx.cmds[:], proc(a, b: Ui_Cmd) -> bool {
+		za, zb: int
+		switch v in a {
+		case Ui_Cmd_Text:
+			za = v.z
+		case Ui_Cmd_Rect:
+			za = v.z
+		}
+		switch v in b {
+		case Ui_Cmd_Text:
+			zb = v.z
+		case Ui_Cmd_Rect:
+			zb = v.z
+		}
+		return za < zb
+	})
+
+	return ctx.cmds[:]
+}
+
+ui_context_init :: proc(
+	ctx:          ^Ui_Context,
+	measure_text: Ui_Measure_Text_Proc,
+	user_pointer: rawptr,
+	theme        := UI_DEFAULT_THEME,
+	allocator    := context.allocator,
+) {
+	ctx.theme        = theme
+	ctx.measure_text = measure_text
+	ctx.user_pointer = user_pointer
+
+	ctx.cmds.allocator   = allocator
+	ctx.popups.allocator = allocator
+	ctx.stack.allocator  = allocator
+	ctx.state.allocator  = allocator
+
+	err := virtual.arena_init_growing(&ctx.state_arena)
+	assert(err == nil)
+}
+
+ui_context_destroy:: proc(ctx: ^Ui_Context) {
+	delete(ctx.cmds)
+	delete(ctx.popups)
+	delete(ctx.stack)
+	delete(ctx.state)
+	virtual.arena_destroy(&ctx.state_arena)
 }
 
 @(require_results, deferred_in_out = ui_section_end)

@@ -34,7 +34,7 @@ cpu_init :: proc(cpu: ^CPU, mem: []byte, sections: []Section, stdout: io.Writer,
 	for section in sections {
 		switch section.type {
 		case .Text:
-			assembled := assemble_instructions(section.data.?)
+			assembled := assemble_instructions(section.data.?, context.temp_allocator)
 			copy(slice.reinterpret([]u32, cpu.mem[section.offset:]), assembled)
 		case .Data, .Rodata:
 			copy(cpu.mem[section.offset:], section.data.([]byte))

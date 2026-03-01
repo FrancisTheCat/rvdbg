@@ -100,7 +100,7 @@ print_disassembly :: proc(
 		return
 	}
 
-	lines := strings.split_lines(source)
+	lines := strings.split_lines(source, context.temp_allocator)
 
 	max_line_len: int
 	for line in lines[section.line_start:section.line_end - 1] {
@@ -109,7 +109,7 @@ print_disassembly :: proc(
 
 	instructions := section.data.([]Instruction)
 
-	scratch_builder: strings.Builder
+	scratch_builder := strings.builder_make(context.temp_allocator)
 	max_inst_len: int
 	for inst in instructions {
 		print_instruction(strings.to_writer(&scratch_builder), inst, register_names)

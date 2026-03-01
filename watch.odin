@@ -395,6 +395,7 @@ watch_window_ui :: proc(ctx: ^Ui_Context, debugger: ^Debugger, watch_window: ^Wa
 	}
 
 	if to_be_removed != -1 {
+		strings.builder_destroy(&watch_window.watches[to_be_removed].input)
 		ordered_remove(&watch_window.watches, to_be_removed)
 	}
 
@@ -412,8 +413,10 @@ watch_window_ui :: proc(ctx: ^Ui_Context, debugger: ^Debugger, watch_window: ^Wa
 	}
 }
 
-debugger_set_last_error :: proc(debugger: ^Debugger, error: string) {
-	fmt.eprintln("Error:", error)
-	delete(debugger.last_error, context.allocator)
-	debugger.last_error = strings.clone(error, context.allocator)
+watch_window_destroy :: proc(watch_window: ^Watch_Window) {
+	for &watch in watch_window.watches {
+		strings.builder_destroy(&watch.input)
+	}
+	delete(watch_window.watches)
+	strings.builder_destroy(&watch_window.input)
 }
