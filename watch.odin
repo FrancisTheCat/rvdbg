@@ -366,8 +366,12 @@ watch_window_ui :: proc(ctx: ^Ui_Context, debugger: ^Debugger, watch_window: ^Wa
 		ctx.min_size.x = last_max_widths[0]
 
 		if .Submit in ui_textbox(ctx, &watch.input, "0x0", min_size = &min_size, font = .Monospace) {
+			if strings.builder_len(watch.input) == 0 {
+				to_be_removed = i
+				continue
+			}
+
 			_, _, error, ok := watch_expression_evaluate(strings.to_string(watch.input), debugger, context.temp_allocator)
-			to_be_removed = i
 			if !ok {
 				debugger_set_last_error(debugger, error)
 			}
