@@ -9,8 +9,8 @@ import "glodin"
 ATLAS_RESOLUTION :: 512
 
 FONT_PATHS :: [Ui_Font]string {
-	// .Interface = "/usr/share/fonts/inter/InterVariable.ttf",
-	.Interface = "/usr/share/fonts/TTF/JetBrainsMonoNerdFont-Regular.ttf",
+	.Interface = "/usr/share/fonts/inter/InterVariable.ttf",
+	// .Interface = "/usr/share/fonts/TTF/JetBrainsMonoNerdFont-Regular.ttf",
 	.Monospace = "/usr/share/fonts/TTF/JetBrainsMonoNerdFont-Regular.ttf",
 }
 
@@ -22,6 +22,7 @@ Font :: struct {
 draw_string :: proc(
 	instance_buffer: ^[dynamic]Instance_Data,
 	font:            Font,
+	font_id:         i32,
 	str:             string,
 	position:        glm.vec2,
 	color:           [4]f32,
@@ -55,7 +56,7 @@ draw_string :: proc(
 			rect        = { quad.x0, quad.y0, quad.x1, quad.y1, },
 			tex_rect    = { quad.s0, quad.t0, quad.s1, quad.t1, },
 			color       = color,
-			use_texture = true,
+			texture     = font_id,
 		})
 	}
 }

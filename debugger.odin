@@ -265,8 +265,9 @@ window :: proc(source: string) {
 		glodin.clear_color(0, CLEAR_COLOR)
 
 		glodin.set_uniforms(program, {
-			{ "u_window_size", glm.vec2{ f32(w), f32(h), }, },
-			{ "u_texture",     fonts[.Interface].texture,   },
+			{ "u_window_size",     glm.vec2{ f32(w), f32(h), }, },
+			{ "u_atlas_interface", fonts[.Interface].texture,   },
+			{ "u_atlas_monospace", fonts[.Monospace].texture,   },
 		})
 
 		slice.stable_sort_by(ui_ctx.cmds[:], proc(a, b: Ui_Cmd) -> bool {
@@ -291,7 +292,8 @@ window :: proc(source: string) {
 			case Ui_Cmd_Text:
 				draw_string(
 					&instance_buffer,
-					fonts[.Interface],
+					fonts[cmd.font],
+					i32(cmd.font),
 					cmd.text,
 					{ f32(cmd.position.x), f32(cmd.position.y), },
 					cmd.color,
@@ -327,7 +329,7 @@ Instance_Data :: struct {
 	rect, tex_rect:      glm.vec4,
 	color, border_color: glm.vec4,
 	border_width_radius: glm.vec2,
-	use_texture:         bool,
+	texture:             i32,
 }
 
 vertex_buffer: []Vertex_2D = {
@@ -398,14 +400,24 @@ debugger_ui :: proc(ctx: ^Ui_Context, debugger: ^Debugger) {
 			_ = ui_button(ctx, "Redo")
 		}
 		if ui_popup_toggle(ctx, "Settings") {
+			@(static)
+			max_width: int
+			last_max_width := max_width
+			max_width       = 0
+
 			named_slider :: proc(ctx: ^Ui_Context, name: string, value: ^int) {
 				if ui_section(ctx, name, .Down, {}) {
 					ctx.direction = .Right
-					ui_label(ctx, name)
+
+					min_size: [2]int
+					ui_label(ctx, name, min_size = &min_size)
+					max_width = max(max_width, min_size.x)
+					ctx.min_size.x = 0
 					ui_slider(ctx, value, 0, 20)
 				}
 			}
 
+			ctx.min_size.x = last_max_width
 			named_slider(ctx, "Padding",       &UI_PADDING)
 			named_slider(ctx, "Text Padding",  &UI_TEXT_PADDING)
 			named_slider(ctx, "Border Width",  &UI_BORDER_WIDTH)
@@ -465,7 +477,7 @@ debugger_ui :: proc(ctx: ^Ui_Context, debugger: ^Debugger) {
 
 	if ui_section(ctx, "Footer", .Up, { .Separator, }) {
 		ctx.direction = .Left
-		ui_label(ctx, fmt.tprintf("Status: %v", debugger.state))
+		ui_label(ctx, fmt.tprintf("Status: %v", debugger.state), font = .Monospace)
 		if .Clicked in ui_button(ctx, fmt.tprintf("PC: 0x%08x", debugger.cpu.pc)) {
 			debugger.focused_address = debugger.cpu.pc
 		}
@@ -500,9 +512,9 @@ debugger_ui :: proc(ctx: ^Ui_Context, debugger: ^Debugger) {
 						border.color = CLOSE_COLOR
 						border.width = UI_BORDER_WIDTH
 					}
-					if .Tooltip in ui_label(ctx, fmt.tprintf("0x%08x", debugger.cpu.registers[register]), border = border) {
+					if .Tooltip in ui_label(ctx, fmt.tprintf("0x%08x", debugger.cpu.registers[register]), border = border, font = .Monospace) {
 						if ui_tooltip_popup(ctx, fmt.tprintf("Tooltip_Registers_%d", register)) {
-							ui_label(ctx, strings.to_lower(reflect.enum_name_from_value(register) or_else "---", context.temp_allocator))
+							ui_label(ctx, register_names[register], font = .Monospace)
 						}
 					}
 				}
@@ -512,7 +524,7 @@ debugger_ui :: proc(ctx: ^Ui_Context, debugger: ^Debugger) {
 		if ui_toggle(ctx, "Memory") {
 			_ = ui_section(ctx, "Memory_Section", .Down, { .Separator, })
 
-			if .Submit in ui_textbox(ctx, &debugger.memory_view.input, "0x0") {
+			if .Submit in ui_textbox(ctx, &debugger.memory_view.input, "0x0", font = .Monospace) {
 				address, _, error, ok := watch_expression_evaluate(
 					strings.to_string(debugger.memory_view.input),
 					debugger,
@@ -526,7 +538,15 @@ debugger_ui :: proc(ctx: ^Ui_Context, debugger: ^Debugger) {
 			}
 
 			value := &debugger.cpu.mem[debugger.memory_view.address]
-			ui_label(ctx, fmt.tprintf("0x%08x: 0x%08x", debugger.memory_view.address, intrinsics.unaligned_load((^u32)(value))))
+			ui_label(
+				ctx,
+				fmt.tprintf(
+					"0x%08x: 0x%08x",
+					debugger.memory_view.address,
+					intrinsics.unaligned_load((^u32)(value)),
+				),
+				font = .Monospace,
+			)
 		}
 
 		if ui_toggle(ctx, "Watch") {
@@ -548,7 +568,7 @@ debugger_ui :: proc(ctx: ^Ui_Context, debugger: ^Debugger) {
 				if .Clicked in ui_color_button(ctx, UI_TEXT_HEIGHT + UI_TEXT_PADDING * 2, color) {
 					enabled^ ~= true
 				}
-				if .Clicked in ui_button(ctx, fmt.tprintf("0x%08x", address)) {
+				if .Clicked in ui_button(ctx, fmt.tprintf("0x%08x", address), font = .Monospace) {
 					debugger.focused_address = address
 				}
 				if .Clicked in ui_color_button(ctx, UI_TEXT_HEIGHT + UI_TEXT_PADDING * 2, CLOSE_COLOR) {
@@ -581,11 +601,11 @@ debugger_ui :: proc(ctx: ^Ui_Context, debugger: ^Debugger) {
 			ui_draw_rect(ctx, ctx.rect, UI_DARK_COLOR, { radius = UI_BORDER_RADIUS, })
 			str := strings.to_string(debugger.output_buffer)
 			for len(str) != 0 {
-				line := string_wrap(ctx, &str, ctx.max.x - ctx.min.x - UI_TEXT_PADDING * 2, .Interface, UI_TEXT_HEIGHT)
+				line := string_wrap(ctx, &str, ctx.max.x - ctx.min.x - UI_TEXT_PADDING * 2, .Monospace, UI_TEXT_HEIGHT)
 				if len(line) == 0 {
 					break
 				}
-				ui_text(ctx, line, UI_TEXT_COLOR)
+				ui_text(ctx, line, UI_TEXT_COLOR, .Monospace)
 			}
 		}
 	}
@@ -612,8 +632,8 @@ debugger_ui :: proc(ctx: ^Ui_Context, debugger: ^Debugger) {
 		address:     u32,
 		active:      bool,
 	) {
-		ui_text :: proc(ctx: ^Ui_Context, text: string, color: [4]f32, font: Ui_Font = .Interface, font_size := UI_TEXT_HEIGHT) {
-			width := int(ctx.measure_text(font, font_size, text, ctx.user_pointer))
+		ui_text :: proc(ctx: ^Ui_Context, text: string, color: [4]f32, font_size := UI_TEXT_HEIGHT) {
+			width := int(ctx.measure_text(.Monospace, font_size, text, ctx.user_pointer))
 			ui_draw_text(ctx, text, ctx.min + UI_TEXT_PADDING + [2]int{ 0, font_size, }, color, .Monospace)
 			ctx.extents.max = la.max(
 				ctx.extents.max,

@@ -42,8 +42,8 @@ Ui_Cmd :: union {
 }
 
 Ui_Font :: enum {
-	Interface,
-	Monospace,
+	Interface = 1,
+	Monospace = 2,
 }
 
 Ui_Button_State :: enum {
@@ -527,9 +527,10 @@ ui_button :: proc(
 	ctx:      ^Ui_Context,
 	text:     string,
 	border:   Maybe(Ui_Border) = nil,
+	font:     Ui_Font          = .Interface,
 	out_rect: ^Ui_Rect         = nil,
 ) -> (result: Ui_Result) {
-	width  := int(ctx.measure_text(.Interface, UI_TEXT_HEIGHT, text, ctx.user_pointer)) + UI_TEXT_PADDING * 2
+	width  := int(ctx.measure_text(font, UI_TEXT_HEIGHT, text, ctx.user_pointer)) + UI_TEXT_PADDING * 2
 	height := UI_TEXT_HEIGHT + UI_TEXT_PADDING * 2
 	rect   := ui_insert_rect(ctx, { width, height, })
 	result  = ui_rect_result(ctx, rect)
@@ -557,7 +558,7 @@ ui_button :: proc(
 	ui_draw_text(ctx, text, {
 		rect.min.x + UI_TEXT_PADDING,
 		rect.min.y + UI_TEXT_PADDING + UI_TEXT_HEIGHT,
-	}, UI_TEXT_COLOR)
+	}, UI_TEXT_COLOR, font)
 
 	return
 }
@@ -566,12 +567,13 @@ ui_button :: proc(
 ui_textbox :: proc(
 	ctx:          ^Ui_Context,
 	text:         ^strings.Builder,
-	initial_text: string   = "",
-	max_length:   int      = -1,
-	out_rect:     ^Ui_Rect = nil,
-	min_size:     ^[2]int  = nil,
+	initial_text: string         = "",
+	max_length:   int            = -1,
+	font:         Ui_Font        = .Interface,
+	out_rect:     ^Ui_Rect       = nil,
+	min_size:     ^[2]int        = nil,
 ) -> (result: Ui_Result) {
-	width := int(ctx.measure_text(.Interface, UI_TEXT_HEIGHT, strings.to_string(text^), ctx.user_pointer)) + UI_TEXT_PADDING * 2
+	width := int(ctx.measure_text(font, UI_TEXT_HEIGHT, strings.to_string(text^), ctx.user_pointer)) + UI_TEXT_PADDING * 2
 	rect  := ui_insert_rect(ctx, { width, UI_TEXT_HEIGHT + UI_TEXT_PADDING * 2, })
 	result = ui_rect_result(ctx, rect)
 	id    := ui_hash(text)
@@ -635,7 +637,7 @@ ui_textbox :: proc(
 	ui_draw_text(ctx, strings.to_string(text^), {
 		rect.min.x + UI_TEXT_PADDING,
 		rect.min.y + UI_TEXT_PADDING + UI_TEXT_HEIGHT,
-	}, UI_TEXT_COLOR)
+	}, UI_TEXT_COLOR, font)
 
 	return
 }
@@ -645,11 +647,12 @@ ui_label :: proc(
 	text:     string,
 	color:    [4]f32           = UI_BUTTON_COLOR,
 	border:   Maybe(Ui_Border) = nil,
+	font:     Ui_Font          = .Interface,
 	out_rect: ^Ui_Rect         = nil,
 	min_size: ^[2]int          = nil,
 ) -> (result: Ui_Result) {
 	border := border.? or_else ctx.theme.border
-	width  := int(ctx.measure_text(.Interface, UI_TEXT_HEIGHT, text, ctx.user_pointer)) + UI_TEXT_PADDING * 2
+	width  := int(ctx.measure_text(font, UI_TEXT_HEIGHT, text, ctx.user_pointer)) + UI_TEXT_PADDING * 2
 	rect   := ui_insert_rect(ctx, { width, UI_TEXT_HEIGHT + UI_TEXT_PADDING * 2, })
 	result  = ui_rect_result(ctx, rect)
 
@@ -669,7 +672,7 @@ ui_label :: proc(
 	ui_draw_text(ctx, text, {
 		rect.min.x + UI_TEXT_PADDING,
 		rect.min.y + UI_TEXT_PADDING + UI_TEXT_HEIGHT,
-	}, UI_TEXT_COLOR)
+	}, UI_TEXT_COLOR, font)
 
 	return
 }
@@ -696,8 +699,8 @@ ui_draw_text :: proc(
 	text:      string,
 	position:  [2]int,
 	color:     [4]f32,
-	font:      Ui_Font = .Interface,
-	font_size: int     = UI_TEXT_HEIGHT,
+	font:      Ui_Font,
+	font_size: int = UI_TEXT_HEIGHT,
 ) {
 	append(&ctx.cmds, Ui_Cmd_Text {
 		position = position,
@@ -985,6 +988,7 @@ ui_slider :: proc(
 	min_value: T,
 	max_value: T,
 	width:     int              = UI_SLIDER_DEFAULT_WIDTH,
+	font:      Ui_Font          = .Interface,
 	border:    Maybe(Ui_Border) = nil,
 ) -> (result: Ui_Result) {
 	id    := ui_hash(value)
@@ -999,6 +1003,6 @@ ui_slider :: proc(
 	ui_draw_text(ctx, fmt.tprint(value^), {
 		out_rect.min.x + UI_TEXT_PADDING,
 		out_rect.min.y + UI_TEXT_PADDING + UI_TEXT_HEIGHT,
-	}, UI_TEXT_COLOR)
+	}, UI_TEXT_COLOR, font)
 	return
 }

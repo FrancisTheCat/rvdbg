@@ -365,7 +365,7 @@ watch_window_ui :: proc(ctx: ^Ui_Context, debugger: ^Debugger, watch_window: ^Wa
 		ctx.direction  = .Right
 		ctx.min_size.x = last_max_widths[0]
 
-		if .Submit in ui_textbox(ctx, &watch.input, "0x0", min_size = &min_size) {
+		if .Submit in ui_textbox(ctx, &watch.input, "0x0", min_size = &min_size, font = .Monospace) {
 			_, _, error, ok := watch_expression_evaluate(strings.to_string(watch.input), debugger, context.temp_allocator)
 			to_be_removed = i
 			if !ok {
@@ -378,14 +378,14 @@ watch_window_ui :: proc(ctx: ^Ui_Context, debugger: ^Debugger, watch_window: ^Wa
 		value, format, error, ok := watch_expression_evaluate(strings.to_string(watch.input), debugger, context.temp_allocator)
 		if ok {
 			str, truncated := watch_expression_format(value, format, debugger, context.temp_allocator)
-			if .Tooltip in ui_label(ctx, str, min_size = &min_size) && truncated {
+			if .Tooltip in ui_label(ctx, str, min_size = &min_size, font = .Monospace) && truncated {
 				if ui_tooltip_popup(ctx, fmt.tprintf("Tooltip_Watch_%d", i)) {
 					ctx.min_size = {}
 					ui_label(ctx, "truncated")
 				}
 			}
 		} else {
-			ui_label(ctx, error, min_size = &min_size)
+			ui_label(ctx, error, min_size = &min_size, font = .Monospace)
 		}
 		max_widths[1] = max(max_widths[1], min_size.x)
 	}
@@ -394,7 +394,7 @@ watch_window_ui :: proc(ctx: ^Ui_Context, debugger: ^Debugger, watch_window: ^Wa
 		ordered_remove(&watch_window.watches, to_be_removed)
 	}
 
-	if .Submit in ui_textbox(ctx, &watch_window.input, "0x0") {
+	if .Submit in ui_textbox(ctx, &watch_window.input, "0x0", font = .Monospace) {
 		_, _, error, ok := watch_expression_evaluate(strings.to_string(watch_window.input), debugger, context.temp_allocator)
 		if !ok {
 			debugger_set_last_error(debugger, error)

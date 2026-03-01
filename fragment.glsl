@@ -7,11 +7,12 @@ layout(location = 3)      in vec4  v_color;
 layout(location = 4)      in vec4  v_border_color;
 layout(location = 5)      in float v_border_width;
 layout(location = 6)      in float v_border_radius;
-layout(location = 7) flat in int   v_use_texture;
+layout(location = 7) flat in int   v_texture;
 
 layout(location = 0) out vec4 f_color;
 
-uniform sampler2D u_texture;
+uniform sampler2D u_atlas_interface;
+uniform sampler2D u_atlas_monospace;
 
 // adapted from https://iquilezles.org/articles/distfunctions2d/
 float rounded_box_sdf(vec2 p, vec2 b, float r) {
@@ -50,8 +51,14 @@ void main() {
     }
 
     f_color *= v_color;
-    if (v_use_texture != 0) {
-        f_color.a *= texture(u_texture, v_tex_coords).r;
+
+    switch (v_texture) {
+    case 1: {
+        f_color.a *= texture(u_atlas_interface, v_tex_coords).r;
+    } break;
+    case 2: {
+        f_color.a *= texture(u_atlas_monospace, v_tex_coords).r;
+    } break;
     }
 
     f_color = mix(f_color, v_border_color, border_weight);
