@@ -543,8 +543,7 @@ ui_button :: proc(
 	out_rect: ^Ui_Rect         = nil,
 ) -> (result: Ui_Result) {
 	width  := int(ctx.measure_text(font, ctx.theme.text_height, text, ctx.user_pointer)) + ctx.theme.text_padding * 2
-	height := ctx.widget_height
-	rect   := ui_insert_rect(ctx, { width, height, })
+	rect   := ui_insert_rect(ctx, { width, ctx.widget_height, })
 	result  = ui_rect_result(ctx, rect)
 
 	if out_rect != nil {
@@ -722,6 +721,7 @@ ui_draw_text :: proc(
 Ui_Section_Flag :: enum {
 	Separator,
 	Resizeable,
+	Side_Bar,
 }
 Ui_Section_Flags :: bit_set[Ui_Section_Flag]
 
@@ -792,6 +792,8 @@ _ui_section :: proc(ctx: ^Ui_Context, id: string, direction: Ui_Direction, flags
 
 	separator_color := ctx.theme.colors[.Border]
 	if .Resizeable in flags {
+		state.manual_size = la.max(state.manual_size, state.size)
+
 		if state.dragged {
 			separator_color = ctx.theme.colors[.Text]
 			switch direction {
@@ -805,25 +807,27 @@ _ui_section :: proc(ctx: ^Ui_Context, id: string, direction: Ui_Direction, flags
 				state.manual_size.y += ctx.mouse_delta.y
 			}
 			if ctx.mouse_buttons[0] == .None {
-				state.dragged     = false
-				state.manual_size = la.max(state.manual_size, state.size)
+				state.dragged = false
 			}
 		} else {
-			if state.manual_size == 0 {
-				state.manual_size = state.size
-			}
-			
 			if ui_rect_contains(ui_rect_inflate(separator_rect, UI_RESIZE_MARGIN), ctx.mouse_position) {
 				separator_color = { 0.55, 0.55, 0.55, 1, }
 				if ctx.mouse_buttons[0] == .Just_Clicked {
-					state.dragged     = true
-					state.manual_size = la.max(state.manual_size, state.size)
+					state.dragged = true
 				}
 			}
 		}
 	}
 
-	ui_draw_rect(ctx, separator_rect, separator_color)
+	ui_draw_rect(ctx, separator_rect, separator_color, border = { radius = ctx.theme.border_width / 2, })
+	if .Side_Bar in flags {
+		ctx.rect.min.x += ctx.theme.padding
+		ui_draw_rect(ctx, {
+			min = { ctx.rect.min.x,                          ctx.rect.min.y, },
+			max = { ctx.rect.min.x + ctx.theme.border_width, ctx.rect.max.y, },
+		}, separator_color, border = { radius = ctx.theme.border_width / 2, })
+		ctx.rect.min.x += ctx.theme.padding + ctx.theme.border_width
+	}
 
 	return true
 }
@@ -948,8 +952,7 @@ _ui_slider :: proc(
 	assert(max_value > min_value)
 
 	border := border.? or_else { radius = ctx.theme.border_radius, }
-	height := ctx.widget_height
-	rect   := ui_insert_rect(ctx, { width, height, })
+	rect   := ui_insert_rect(ctx, { width, ctx.widget_height, })
 	result  = ui_rect_result(ctx, rect)
 	id     := ui_hash(value)
 
@@ -1037,5 +1040,5 @@ ui_toggle_section :: proc(
 		return false
 	}
 
-	return _ui_section(ctx, text, direction, flags)
+	return _ui_section(ctx, text, direction, flags | { .Side_Bar, })
 }
