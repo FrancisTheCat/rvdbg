@@ -9,7 +9,6 @@ import     "core:os"
 import rb  "core:container/rbtree"
 import     "core:reflect"
 import     "core:slice"
-import     "core:strconv"
 import     "core:strings"
 import     "core:time"
 import     "core:terminal/ansi"
@@ -103,46 +102,8 @@ window :: proc(source: string) {
 	defer delete(atlas_pixels)
 
 	fonts: [Ui_Font]Font
-	for font_path, font_id in FONT_PATHS {
-		font_data := os.read_entire_file(font_path, context.allocator) or_else panic("Failed to open font file")
-		defer delete(font_data)
-
-		fonts[font_id].characters = make([]stbtt.bakedchar, 256)
-
-		font_info: stbtt.fontinfo
-		stbtt.InitFont(&font_info, raw_data(font_data), 0)
-
-		ascent, descent: i32
-		stbtt.GetFontVMetrics(&font_info, &ascent, &descent, nil)
-
-		// This is the most accurate way to get glyph height to my knowledge and yes, that is insane
-		cap_height: i32
-		stbtt.GetCodepointBox(&font_info, 'H', nil, nil, nil, &cap_height)
-		assert(cap_height > 0)
-
-		scale        := f32(UI_TEXT_HEIGHT) / f32(cap_height)
-		pixel_height := f32(ascent - descent) * scale
-
-		result := stbtt.BakeFontBitmap(
-			raw_data(font_data),
-			0,
-			pixel_height,
-			raw_data(atlas_pixels),
-			ATLAS_RESOLUTION,
-			ATLAS_RESOLUTION,
-			0,
-			256,
-			raw_data(fonts[font_id].characters),
-		)
-		assert(result > 0)
-
-		fonts[font_id].texture = glodin.create_texture_with_data(
-			ATLAS_RESOLUTION,
-			ATLAS_RESOLUTION,
-			atlas_pixels,
-			mag_filter = .Nearest,
-			min_filter = .Nearest,
-		)
+	for &font in fonts {
+		font.characters = make([]stbtt.bakedchar, 256)
 	}
 
 	defer for font in fonts {
@@ -165,6 +126,9 @@ window :: proc(source: string) {
 
 	start_time := time.now()
 
+	prev_mouse_position: [2]int
+	prev_text_height := -1
+
 	for !glfw.WindowShouldClose(window) && !ui_ctx.should_close {
 		if debugger.reset {
 			virtual.release(raw_data(mem), len(mem))
@@ -176,12 +140,58 @@ window :: proc(source: string) {
 			debugger.reset = false
 		}
 
+		if UI_TEXT_HEIGHT != prev_text_height {
+			for font_path, font_id in FONT_PATHS {
+				font_data := os.read_entire_file(font_path, context.temp_allocator) or_else panic("Failed to open font file")
+
+				font_info: stbtt.fontinfo
+				stbtt.InitFont(&font_info, raw_data(font_data), 0)
+
+				ascent, descent: i32
+				stbtt.GetFontVMetrics(&font_info, &ascent, &descent, nil)
+
+				// This is the most accurate way to get glyph height to my knowledge and yes, that is insane
+				cap_height: i32
+				stbtt.GetCodepointBox(&font_info, 'H', nil, nil, nil, &cap_height)
+				assert(cap_height > 0)
+
+				scale        := f32(UI_TEXT_HEIGHT) / f32(cap_height)
+				pixel_height := f32(ascent - descent) * scale
+
+				result := stbtt.BakeFontBitmap(
+					raw_data(font_data),
+					0,
+					pixel_height,
+					raw_data(atlas_pixels),
+					ATLAS_RESOLUTION,
+					ATLAS_RESOLUTION,
+					0,
+					256,
+					raw_data(fonts[font_id].characters),
+				)
+				assert(result > 0)
+
+				if fonts[font_id].texture != 0 {
+					glodin.destroy(fonts[font_id].texture)
+				}
+				fonts[font_id].texture = glodin.create_texture_with_data(
+					ATLAS_RESOLUTION,
+					ATLAS_RESOLUTION,
+					atlas_pixels,
+					mag_filter = .Nearest,
+					min_filter = .Nearest,
+				)
+			}
+			prev_text_height = UI_TEXT_HEIGHT
+		}
+
 		w, h        := glfw.GetFramebufferSize(window)
 		ui_ctx.max.x = int(w)
 		ui_ctx.max.y = int(h)
 
 		mouse_position       := la.array_cast(input.get_mouse_position(), int)
-		ui_ctx.mouse_delta    = mouse_position - ui_ctx.mouse_position
+		ui_ctx.mouse_delta    = mouse_position - prev_mouse_position
+		prev_mouse_position   = mouse_position
 		ui_ctx.mouse_position = mouse_position
 		ui_ctx.mouse_scroll   = la.array_cast(input.get_scroll(), int)
 
@@ -190,15 +200,16 @@ window :: proc(source: string) {
 		ui_ctx.current_time = current_time
 
 		for &button, i in ui_ctx.mouse_buttons {
-			pressed := input.get_mouse_button(i32(i))
-			if pressed {
-				if button == .None {
-					button = .Just_Clicked
-				} else {
-					button = .Clicked
-				}
-			} else {
+			state := input.get_mouse_button_raw(i32(i))
+			switch state {
+			case .Not_Pressed:
 				button = .None
+			case .Just_Released:
+				button = .None
+			case .Just_Pressed:
+				button = .Just_Clicked
+			case .Pressed:
+				button = .Clicked
 			}
 		}
 
@@ -238,12 +249,16 @@ window :: proc(source: string) {
 			case .Backspace:     k = .Backspace
 			case .Escape:        k = .Escape
 			case .Enter:         k = .Enter
+			case .Left_Shift:    k = .Left_Shift
+			case .Right_Shift:   k = .Right_Shift
 			case:
 				continue
 			}
 
 			keys^ |= { k, }
 		}
+
+		ui_ctx.text_input = input.get_text_input()
 
 		debugger_ui(&ui_ctx, &debugger)
 
@@ -303,6 +318,8 @@ window :: proc(source: string) {
 
 		input.poll()
 		glfw.PollEvents()
+
+		free_all(context.temp_allocator)
 	}
 }
 
@@ -340,6 +357,7 @@ Debugger :: struct {
 		input:   strings.Builder,
 		address: u32,
 	},
+	watch_window:    Watch_Window,
 	last_error:      string,
 }
 
@@ -354,6 +372,10 @@ debugger_ui :: proc(ctx: ^Ui_Context, debugger: ^Debugger) {
 	ctx.max -= UI_PADDING
 	if ctx.mouse_buttons[0] == .Just_Clicked {
 		ctx.active_id = 0
+	}
+
+	ctx.theme = {
+		border = { radius = UI_BORDER_RADIUS, },
 	}
 
 	BREAK_COLOR    :: [4]f32{ .5,   .3,   .3,   1, }
@@ -376,22 +398,20 @@ debugger_ui :: proc(ctx: ^Ui_Context, debugger: ^Debugger) {
 			_ = ui_button(ctx, "Redo")
 		}
 		if ui_popup_toggle(ctx, "Settings") {
-			ui_slider :: proc(ctx: ^Ui_Context, name: string, value: ^int) {
+			named_slider :: proc(ctx: ^Ui_Context, name: string, value: ^int) {
 				if ui_section(ctx, name, .Down, {}) {
 					ctx.direction = .Right
-					if .Clicked in ui_color_button(ctx, UI_TEXT_HEIGHT + UI_TEXT_PADDING * 2, MAXIMIZE_COLOR, { radius = UI_BORDER_RADIUS}) {
-						value^ += 1
-					}
-					if .Clicked in ui_color_button(ctx, UI_TEXT_HEIGHT + UI_TEXT_PADDING * 2, CLOSE_COLOR,    { radius = UI_BORDER_RADIUS}) {
-						value^ -= 1
-					}
-					_ = ui_button(ctx, name)
+					ui_label(ctx, name)
+					ui_slider(ctx, value, 0, 20)
 				}
 			}
 
-			ui_slider(ctx, "Padding",      &UI_PADDING)
-			ui_slider(ctx, "Text Padding", &UI_TEXT_PADDING)
-			ui_slider(ctx, "Border Width", &UI_BORDER_WIDTH)
+			named_slider(ctx, "Padding",       &UI_PADDING)
+			named_slider(ctx, "Text Padding",  &UI_TEXT_PADDING)
+			named_slider(ctx, "Border Width",  &UI_BORDER_WIDTH)
+			named_slider(ctx, "Border Radius", &UI_BORDER_RADIUS)
+			named_slider(ctx, "Text Height",   &UI_TEXT_HEIGHT)
+
 			if .Clicked in ui_button(ctx, "Register Names") {
 				debugger.register_names ~= true
 			}
@@ -415,13 +435,13 @@ debugger_ui :: proc(ctx: ^Ui_Context, debugger: ^Debugger) {
 
 		ctx.direction = .Left
 		size := UI_TEXT_HEIGHT + UI_TEXT_PADDING * 2
-		if .Clicked in ui_color_button(ctx, size, CLOSE_COLOR,    { radius = UI_BORDER_RADIUS, }) {
+		if .Clicked in ui_color_button(ctx, size, CLOSE_COLOR) {
 			ctx.should_close = true
 		}
-		if .Clicked in ui_color_button(ctx, size, MAXIMIZE_COLOR, { radius = UI_BORDER_RADIUS, }) {
+		if .Clicked in ui_color_button(ctx, size, MAXIMIZE_COLOR) {
 			unimplemented()
 		}
-		if .Clicked in ui_color_button(ctx, size, MINIMIZE_COLOR, { radius = UI_BORDER_RADIUS, }) {
+		if .Clicked in ui_color_button(ctx, size, MINIMIZE_COLOR) {
 			unimplemented()
 		}
 	}
@@ -451,12 +471,12 @@ debugger_ui :: proc(ctx: ^Ui_Context, debugger: ^Debugger) {
 		}
 		ctx.direction = .Right
 		if debugger.last_error != "" {
-			if .Clicked in ui_button(ctx, debugger.last_error, border = {
+			if .Clicked in ui_button(ctx, debugger.last_error, border = Ui_Border {
 				radius = UI_BORDER_RADIUS,
 				width  = UI_BORDER_WIDTH,
 				color  = CLOSE_COLOR,
 			}) {
-				debugger.last_error = ""
+				debugger_set_last_error(debugger, "")
 			}
 		}
 	}
@@ -492,17 +512,26 @@ debugger_ui :: proc(ctx: ^Ui_Context, debugger: ^Debugger) {
 		if ui_toggle(ctx, "Memory") {
 			_ = ui_section(ctx, "Memory_Section", .Down, { .Separator, })
 
-			if .Submit in ui_textbox(ctx, &debugger.memory_view.input, "0x") {
-				address, ok := strconv.parse_u64(strings.to_string(debugger.memory_view.input))
-				if !ok && address < 1 << 32 {
-					debugger.last_error = "Failed to parse memory address"
+			if .Submit in ui_textbox(ctx, &debugger.memory_view.input, "0x0") {
+				address, _, error, ok := watch_expression_evaluate(
+					strings.to_string(debugger.memory_view.input),
+					debugger,
+					context.temp_allocator,
+				)
+				if !ok {
+					debugger_set_last_error(debugger, error)
 				} else {
-					debugger.memory_view.address = u32(address)
+					debugger.memory_view.address = address
 				}
 			}
 
 			value := &debugger.cpu.mem[debugger.memory_view.address]
-			ui_label(ctx, fmt.tprintf("0x%08x", intrinsics.unaligned_load((^u32)(value))))
+			ui_label(ctx, fmt.tprintf("0x%08x: 0x%08x", debugger.memory_view.address, intrinsics.unaligned_load((^u32)(value))))
+		}
+
+		if ui_toggle(ctx, "Watch") {
+			_ = ui_section(ctx, "Watch", .Down, { .Separator, })
+			watch_window_ui(ctx, debugger, &debugger.watch_window)
 		}
 
 		if ui_toggle(ctx, "Breakpoints") {
@@ -516,13 +545,13 @@ debugger_ui :: proc(ctx: ^Ui_Context, debugger: ^Debugger) {
 				ctx.direction = .Right
 
 				color := enabled^ ? MAXIMIZE_COLOR : CLOSE_COLOR
-				if .Clicked in ui_color_button(ctx, UI_TEXT_HEIGHT + UI_TEXT_PADDING * 2, color, border = { radius = UI_BORDER_RADIUS, }) {
+				if .Clicked in ui_color_button(ctx, UI_TEXT_HEIGHT + UI_TEXT_PADDING * 2, color) {
 					enabled^ ~= true
 				}
 				if .Clicked in ui_button(ctx, fmt.tprintf("0x%08x", address)) {
 					debugger.focused_address = address
 				}
-				if .Clicked in ui_color_button(ctx, UI_TEXT_HEIGHT + UI_TEXT_PADDING * 2, CLOSE_COLOR, border = { radius = UI_BORDER_RADIUS, }) {
+				if .Clicked in ui_color_button(ctx, UI_TEXT_HEIGHT + UI_TEXT_PADDING * 2, CLOSE_COLOR) {
 					rb.remove(&debugger.breakpoints, address)
 				}
 			}

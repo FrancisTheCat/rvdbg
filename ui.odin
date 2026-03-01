@@ -2,6 +2,7 @@ package rvdbg
 
 import "base:intrinsics"
 
+import "core:fmt"
 import "core:hash"
 import la "core:math/linalg"
 import "core:strings"
@@ -52,13 +53,14 @@ Ui_Button_State :: enum {
 }
 
 Ui_State :: struct {
-	size:        [2]int,
-	manual_size: [2]int,
-	scroll:      [2]int,
-	position:    [2]int,
-	dragged:     bool,
-	active:      bool,
-	last_shown:  int,
+	size:         [2]int,
+	manual_size:  [2]int,
+	scroll:       [2]int,
+	position:     [2]int,
+	dragged:      bool,
+	active:       bool,
+	last_shown:   int,
+	slider_value: f32,
 }
 
 Ui_Direction :: enum {
@@ -72,6 +74,7 @@ Ui_Frame :: struct {
 	using rect: Ui_Rect,
 	extents:    Ui_Rect,
 	direction:  Ui_Direction,
+	min_size:   [2]int,
 }
 
 Ui_Key :: enum {
@@ -322,6 +325,10 @@ ui_key_to_text :: proc(key: Ui_Key) -> string {
 
 Ui_Key_Set :: bit_set[Ui_Key]
 
+Ui_Theme :: struct {
+	border: Ui_Border,
+}
+
 Ui_Context :: struct {
 	// Input, set by the user
 	mouse_position:       [2]int,
@@ -330,6 +337,7 @@ Ui_Context :: struct {
 	mouse_buttons:        [2]Ui_Button_State,
 	keys_pressed:         Ui_Key_Set,
 	keys_down:            Ui_Key_Set,
+	text_input:           string,
 	current_time:         f64,
 	delta_time:           f64,
 
@@ -353,6 +361,8 @@ Ui_Context :: struct {
 	frame_id:             int,
 	active_id:            u64,
 
+	theme:                Ui_Theme,
+
 	stack:                [dynamic]Ui_Frame,
 	state:                map[u64]^Ui_State,
 	z:                    int,
@@ -366,8 +376,8 @@ Ui_Result :: bit_set[enum {
 	Submit,
 }]
 
-UI_TEXT_HEIGHT          :: 9
-UI_BORDER_RADIUS        :: 2
+UI_TEXT_HEIGHT          := 10
+UI_BORDER_RADIUS        := 4
 UI_PADDING              := 4
 UI_TEXT_PADDING         := 6
 UI_BORDER_WIDTH         := 1
@@ -443,6 +453,8 @@ ui_state :: proc(ctx: ^Ui_Context, id_source: $T) -> (state: ^Ui_State) {
 }
 
 ui_insert_rect :: proc(ctx: ^Ui_Context, size: [2]int) -> (rect: Ui_Rect) {
+	size := la.max(size, ctx.min_size)
+
 	switch ctx.direction {
 	case .Down, .Right:
 		rect = {
@@ -514,10 +526,8 @@ ui_toggle :: proc(ctx: ^Ui_Context, text: string, out_rect: ^Ui_Rect = nil) -> b
 ui_button :: proc(
 	ctx:      ^Ui_Context,
 	text:     string,
-	border:   Ui_Border = {
-		radius = UI_BORDER_RADIUS,
-	},
-	out_rect: ^Ui_Rect = nil,
+	border:   Maybe(Ui_Border) = nil,
+	out_rect: ^Ui_Rect         = nil,
 ) -> (result: Ui_Result) {
 	width  := int(ctx.measure_text(.Interface, UI_TEXT_HEIGHT, text, ctx.user_pointer)) + UI_TEXT_PADDING * 2
 	height := UI_TEXT_HEIGHT + UI_TEXT_PADDING * 2
@@ -528,7 +538,7 @@ ui_button :: proc(
 		out_rect^ = rect
 	}
 
-	border := border
+	border := border.? or_else ctx.theme.border
 	color  := UI_BUTTON_COLOR
 	if rect_contains(rect, ctx.mouse_position) {
 		result      |= { .Hovered, }
@@ -557,7 +567,9 @@ ui_textbox :: proc(
 	ctx:          ^Ui_Context,
 	text:         ^strings.Builder,
 	initial_text: string   = "",
+	max_length:   int      = -1,
 	out_rect:     ^Ui_Rect = nil,
+	min_size:     ^[2]int  = nil,
 ) -> (result: Ui_Result) {
 	width := int(ctx.measure_text(.Interface, UI_TEXT_HEIGHT, strings.to_string(text^), ctx.user_pointer)) + UI_TEXT_PADDING * 2
 	rect  := ui_insert_rect(ctx, { width, UI_TEXT_HEIGHT + UI_TEXT_PADDING * 2, })
@@ -565,8 +577,14 @@ ui_textbox :: proc(
 	id    := ui_hash(text)
 
 	if id not_in ctx.state {
-		strings.write_string(text, initial_text)
+		if strings.builder_len(text^) == 0 {
+			strings.write_string(text, initial_text)
+		}
 		ctx.state[id] = nil
+	}
+
+	if min_size != nil {
+		min_size^ = { width, UI_TEXT_HEIGHT + UI_TEXT_PADDING * 2, }
 	}
 
 	if out_rect != nil {
@@ -592,6 +610,10 @@ ui_textbox :: proc(
 	if ctx.active_id == id {
 		color        = UI_BACKGROUND_COLOR
 		border_width = UI_BORDER_WIDTH
+
+		max_length   := max_length < 0 ? max(int) : max_length
+		input_length := min(len(ctx.text_input), max_length - strings.builder_len(text^))
+		strings.write_string(text, ctx.text_input[:input_length])
 		for key in ctx.keys_pressed {
 			#partial switch key {
 			case .Backspace:
@@ -601,8 +623,6 @@ ui_textbox :: proc(
 			case .Enter:
 				ctx.active_id = 0
 				result       |= { .Submit, }
-			case:
-				strings.write_string(text, ui_key_to_text(key))
 			}
 		}
 	}
@@ -623,16 +643,22 @@ ui_textbox :: proc(
 ui_label :: proc(
 	ctx:      ^Ui_Context,
 	text:     string,
-	color:    [4]f32    = UI_BUTTON_COLOR,
-	border:   Ui_Border = { radius = UI_BORDER_RADIUS, },
-	out_rect: ^Ui_Rect  = nil,
+	color:    [4]f32           = UI_BUTTON_COLOR,
+	border:   Maybe(Ui_Border) = nil,
+	out_rect: ^Ui_Rect         = nil,
+	min_size: ^[2]int          = nil,
 ) -> (result: Ui_Result) {
-	width := int(ctx.measure_text(.Interface, UI_TEXT_HEIGHT, text, ctx.user_pointer)) + UI_TEXT_PADDING * 2
-	rect  := ui_insert_rect(ctx, { width, UI_TEXT_HEIGHT + UI_TEXT_PADDING * 2, })
-	result = ui_rect_result(ctx, rect)
+	border := border.? or_else ctx.theme.border
+	width  := int(ctx.measure_text(.Interface, UI_TEXT_HEIGHT, text, ctx.user_pointer)) + UI_TEXT_PADDING * 2
+	rect   := ui_insert_rect(ctx, { width, UI_TEXT_HEIGHT + UI_TEXT_PADDING * 2, })
+	result  = ui_rect_result(ctx, rect)
 
 	if .Hovered in result && ctx.current_time - ctx.mouse_last_move_time > HOVER_THRESHOLD {
 		result |= { .Tooltip, }
+	}
+
+	if min_size != nil {
+		min_size^ = { width, UI_TEXT_HEIGHT + UI_TEXT_PADDING * 2, }
 	}
 
 	if out_rect != nil {
@@ -648,7 +674,9 @@ ui_label :: proc(
 	return
 }
 
-ui_color_button :: proc(ctx: ^Ui_Context, size: [2]int, color: [4]f32, border: Ui_Border = {}) -> Ui_Result {
+ui_color_button :: proc(ctx: ^Ui_Context, size: [2]int, color: [4]f32, border: Maybe(Ui_Border) = nil) -> Ui_Result {
+	border := border.? or_else ctx.theme.border
+
 	rect := ui_insert_rect(ctx, size)
 	ui_draw_rect(ctx, rect, color, border)
 	return ui_rect_result(ctx, rect)
@@ -695,7 +723,8 @@ ui_section :: proc(ctx: ^Ui_Context, id: string, direction: Ui_Direction, flags:
 
 @(require_results)
 _ui_section :: proc(ctx: ^Ui_Context, id: string, direction: Ui_Direction, flags: Ui_Section_Flags) -> bool {
-	state := ui_state(ctx, id)
+	hash  := ui_hash(id)
+	state := ui_state(ctx, hash)
 	frame := ctx.frame
 
 	size := state.size
@@ -883,7 +912,93 @@ ui_popup_end :: proc(ctx: ^Ui_Context, text: string, show: bool) {
 	state     := ui_state(ctx, text)
 	state.size = ctx.extents.max - ctx.extents.min
 
+	if rect_contains(ctx.extents, ctx.mouse_position) {
+		ctx.mouse_position = min(int)
+		ctx.mouse_delta    = {}
+		ctx.mouse_scroll   = {}
+		ctx.mouse_buttons  = {}
+		ctx.keys_pressed   = {}
+		ctx.keys_down      = {}
+		ctx.text_input     = {}
+	}
+
 	frame    := pop(&ctx.stack)
 	ctx.frame = frame
 	ctx.z    -= 1
+}
+
+UI_SLIDER_DEFAULT_WIDTH :: 50
+
+_ui_slider :: proc(
+	ctx:      ^Ui_Context,
+	value:    ^f32,
+	min_value: f32 = 0,
+	max_value: f32 = 1,
+	width:     int              = UI_SLIDER_DEFAULT_WIDTH,
+	border:    Maybe(Ui_Border) = nil,
+	out_rect: ^Ui_Rect          = nil,
+) -> (result: Ui_Result) {
+	assert(max_value > min_value)
+
+	border := border.? or_else ctx.theme.border
+	height := UI_TEXT_HEIGHT + UI_TEXT_PADDING * 2
+	rect   := ui_insert_rect(ctx, { width, height, })
+	result  = ui_rect_result(ctx, rect)
+	id     := ui_hash(value)
+
+	if out_rect != nil {
+		out_rect^ = rect
+	}
+
+	if .Clicked in result {
+		ctx.active_id = id
+	}
+
+	outer_color: [4]f32 = UI_BUTTON_COLOR
+	inner_color: [4]f32 = UI_BUTTON_CLICKED_COLOR
+	if ctx.active_id == id {
+		if ctx.mouse_buttons[0] != .None {
+			inner_color = UI_BORDER_COLOR
+			step := f32(max_value - min_value) / f32(width)
+			if ctx.keys_down & { .Left_Shift, .Right_Shift} != {} {
+				step *= 0.1
+			}
+			value^ = clamp(value^ + step * f32(ctx.mouse_delta.x), min_value, max_value)
+		} else {
+			ctx.active_id = 0
+		}
+	}
+
+	ui_draw_rect(ctx, rect, outer_color, border)
+	inset         := 2
+	rect           = rect_inflate(rect, -inset)
+	rect.max.x     = rect.min.x + int(f32(rect.max.x - rect.min.x) * f32(value^) / f32(max_value - min_value))
+	border.radius -= inset
+	ui_draw_rect(ctx, rect, inner_color, border)
+
+	return
+}
+
+ui_slider :: proc(
+	ctx:      ^Ui_Context,
+	value:    ^$T,
+	min_value: T,
+	max_value: T,
+	width:     int              = UI_SLIDER_DEFAULT_WIDTH,
+	border:    Maybe(Ui_Border) = nil,
+) -> (result: Ui_Result) {
+	id    := ui_hash(value)
+	init  := id not_in ctx.state
+	state := ui_state(ctx, id)
+	if init {
+		state.slider_value = f32(value^ - min_value) / f32(max_value - min_value)
+	}
+	out_rect: Ui_Rect
+	result = _ui_slider(ctx, &state.slider_value, border = border, out_rect = &out_rect)
+	value^ = T(f32(min_value) + state.slider_value * f32(max_value - min_value))
+	ui_draw_text(ctx, fmt.tprint(value^), {
+		out_rect.min.x + UI_TEXT_PADDING,
+		out_rect.min.y + UI_TEXT_PADDING + UI_TEXT_HEIGHT,
+	}, UI_TEXT_COLOR)
+	return
 }

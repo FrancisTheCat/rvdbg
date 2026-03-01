@@ -1470,13 +1470,21 @@ disassemble_instruction :: proc(data: u32) -> (inst: Instruction, ok: bool) {
 	return
 }
 
-print_instruction :: proc(w: io.Writer, instruction: Instruction, register_names := false, syntax_highlighting := false) -> (n: int) {
+print_instruction :: proc(
+	w:           io.Writer,
+	instruction: Instruction,
+	nice_register_names := false,
+	syntax_highlighting := false,
+) -> (n: int) {
 	info   := instruction_infos[instruction.mnemonic]
 	offset := false
 	if syntax_highlighting {
 		n += fmt.wprint(w, ansi.CSI + ansi.FG_BLUE + ansi.SGR)
 	}
-	n += fmt.wprintf(w, "%s ", info.mnemonic)
+	n += fmt.wprintf(w, "%s", info.mnemonic)
+	if len(info.args) != 0 {
+		n += fmt.wprint(w, ' ')
+	}
 	if syntax_highlighting {
 		n += fmt.wprint(w, ansi.CSI + ansi.RESET + ansi.SGR)
 	}
@@ -1516,8 +1524,8 @@ print_instruction :: proc(w: io.Writer, instruction: Instruction, register_names
 		}
 
 		if reg, ok := reg.?; ok {
-			if register_names {
-				n += fmt.wprint(w, strings.to_lower(reflect.enum_name_from_value(reg) or_else panic("")))
+			if nice_register_names {
+				n += fmt.wprint(w, register_names[reg])
 			} else {
 				n += fmt.wprintf(w, "x%d", int(reg))
 			}
