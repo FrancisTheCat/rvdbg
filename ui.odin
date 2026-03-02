@@ -1005,7 +1005,7 @@ ui_slider :: proc(
 	id    := ui_hash(value)
 	init  := id not_in ctx.state
 	state := ui_state(ctx, id)
-	if init {
+	if init || value^ != T(f32(min_value) + state.slider_value * f32(max_value - min_value)) {
 		state.slider_value = f32(value^ - min_value) / f32(max_value - min_value)
 	}
 	out_rect: Ui_Rect

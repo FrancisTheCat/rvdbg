@@ -22,15 +22,17 @@ CPU_State :: enum {
 	Trivial_Loop,
 
 	Debugger_Breakpoint,
+	Debugger_Paused,
 }
 
-cpu_init :: proc(cpu: ^CPU, mem: []byte, sections: []Section, stdout: io.Writer, entry_point: Location) {
+cpu_init :: proc(cpu: ^CPU, mem: []byte, stdout: io.Writer) {
 	cpu^ = {
 		mem    = mem,
 		stdout = stdout,
-		pc     = u32(sections[entry_point.section].offset + entry_point.offset),
 	}
+}
 
+cpu_load_sections :: proc(cpu: ^CPU, sections: []Section) {
 	for section in sections {
 		switch section.type {
 		case .Text:
