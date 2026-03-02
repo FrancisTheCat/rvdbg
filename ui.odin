@@ -928,7 +928,7 @@ ui_popup_end :: proc(ctx: ^Ui_Context, text: string, show: bool) {
 	state     := ui_state(ctx, text)
 	state.size = ctx.extents.max - ctx.extents.min
 
-	if state.first_shown != ctx.frame_id && ctx.mouse_buttons[0] == .Just_Clicked {
+	if state.first_shown != ctx.frame_id && ctx.mouse_buttons[0] == .Just_Clicked || .Escape in ctx.keys_pressed {
 		// the user just clicked somewhere else, so we should close the popup
 		// note that this does not work for nested popups and will need to be handled differently
 		state.active = false
