@@ -731,9 +731,8 @@ debugger_ui :: proc(ctx: ^Ui_Context, debugger: ^Debugger) {
 	ui_instruction :: proc(
 		ctx:         ^Ui_Context,
 		debugger:    ^Debugger,
-		instruction: Instruction,
+		instruction: u32,
 		address:     u32,
-		active:      bool,
 	) {
 		ui_text :: proc(ctx: ^Ui_Context, text: string, color: [4]f32, text_height: Maybe(int) = nil) {
 			text_height := text_height.? or_else ctx.theme.text_height
@@ -753,6 +752,12 @@ debugger_ui :: proc(ctx: ^Ui_Context, debugger: ^Debugger) {
 		state  := ui_state(ctx, id_str)^
 		_       = ui_section(ctx, id_str, .Down, {})
 		node   := rb.find(debugger.breakpoints, address)
+
+		instruction, ok := disassemble_instruction(instruction)
+		if !ok {
+			ui_text(ctx, "---", CLOSE_COLOR)
+			return
+		}
 
 		background_color: [4]f32
 		border: Ui_Border = {
@@ -776,7 +781,7 @@ debugger_ui :: proc(ctx: ^Ui_Context, debugger: ^Debugger) {
 				node = nil
 				rb.remove(&debugger.breakpoints, address)
 			}
-		} else if active {
+		} else if address == debugger.cpu.pc {
 			background_color = ctx.theme.colors[.Button]
 		}
 
@@ -842,18 +847,12 @@ debugger_ui :: proc(ctx: ^Ui_Context, debugger: ^Debugger) {
 
 	pc_visible: bool
 	for inst, i in instructions {
-		disassembled, ok := disassemble_instruction(inst)
-		if !ok {
-			ui_text(ctx, "---", CLOSE_COLOR)
-			continue
-		}
 		address := debugger.focused_address + u32(i) * 4
 		ui_instruction(
 			ctx,
 			debugger,
-			disassembled,
-			debugger.focused_address + u32(i) * 4,
-			address == debugger.cpu.pc,
+			inst,
+			address,
 		)
 
 		pc_visible ||= address == debugger.cpu.pc

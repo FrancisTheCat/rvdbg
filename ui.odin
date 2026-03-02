@@ -63,6 +63,7 @@ Ui_State :: struct {
 	dragged:      bool,
 	active:       bool,
 	last_shown:   int,
+	first_shown:  int,
 	slider_value: f32,
 }
 
@@ -887,6 +888,10 @@ ui_popup_toggle :: proc(ctx: ^Ui_Context, text: string) -> bool {
 	if .Clicked in ui_button(ctx, text, out_rect = &button_rect) {
 		state.active  ~= true
 		button_clicked = true
+
+		if state.active {
+			state.first_shown = ctx.frame_id
+		}
 	}
 
 	if !state.active {
@@ -897,12 +902,6 @@ ui_popup_toggle :: proc(ctx: ^Ui_Context, text: string) -> bool {
 		min = { button_rect.min.x, button_rect.max.y, },
 	}
 	rect.max = rect.min + state.size + ctx.theme.padding * 2
-	if !button_clicked && ctx.mouse_buttons[0] == .Just_Clicked && !ui_rect_contains(rect, ctx.mouse_position) {
-		// the user just clicked somewhere else, so we should close the popup
-		// note that this does not work for nested popups and will need to be handled differently
-		state.active = false
-		return false
-	}
 
 	append(&ctx.stack, ctx.frame)
 
@@ -929,15 +928,19 @@ ui_popup_end :: proc(ctx: ^Ui_Context, text: string, show: bool) {
 	state     := ui_state(ctx, text)
 	state.size = ctx.extents.max - ctx.extents.min
 
-	if ui_rect_contains(ctx.extents, ctx.mouse_position) {
-		ctx.mouse_position = min(int)
-		ctx.mouse_delta    = {}
-		ctx.mouse_scroll   = {}
-		ctx.mouse_buttons  = {}
-		ctx.keys_pressed   = {}
-		ctx.keys_down      = {}
-		ctx.text_input     = {}
+	if state.first_shown != ctx.frame_id && ctx.mouse_buttons[0] == .Just_Clicked {
+		// the user just clicked somewhere else, so we should close the popup
+		// note that this does not work for nested popups and will need to be handled differently
+		state.active = false
 	}
+
+	ctx.mouse_position = min(int)
+	ctx.mouse_delta    = {}
+	ctx.mouse_scroll   = {}
+	ctx.mouse_buttons  = {}
+	ctx.keys_pressed   = {}
+	ctx.keys_down      = {}
+	ctx.text_input     = {}
 
 	frame    := pop(&ctx.stack)
 	ctx.frame = frame
