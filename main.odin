@@ -105,6 +105,7 @@ debugger_load_program :: proc(debugger: ^Debugger, source: string) {
 	}
 
 	debugger.cpu.pc = u32(sections[start_label.section].offset + start_label.offset)
+	debugger.state  = .Debugger_Paused
 
 	cpu_load_sections(&debugger.cpu, sections)
 }
