@@ -1,11 +1,13 @@
 package rvdbg
 
+import "base:runtime"
+
 import "core:fmt"
 import "core:os"
 import "core:strings"
 
 @(require_results)
-dialog_file_open :: proc(directory := false) -> (file: string, ok: bool) {
+_dialog_file_open :: proc(directory: bool, allocator: runtime.Allocator) -> (file: string, ok: bool) {
 	command: [3]string = {
 		"zenity",
 		"--file-selection",
@@ -21,13 +23,13 @@ dialog_file_open :: proc(directory := false) -> (file: string, ok: bool) {
 		return
 	}
 
-	file = strings.trim_space(string(stdout))
+	file = strings.clone(strings.trim_space(string(stdout)), allocator)
 	ok   = true
 	return
 }
 
 @(require_results)
-dialog_file_open_multiple :: proc(directory := false) -> (files: []string, ok: bool) {
+_dialog_file_open_multiple :: proc(directory: bool, allocator: runtime.Allocator) -> (files: []string, ok: bool) {
 	command: [4]string = {
 		"zenity",
 		"--file-selection",
@@ -44,16 +46,16 @@ dialog_file_open_multiple :: proc(directory := false) -> (files: []string, ok: b
 		return
 	}
 
-	files = strings.split(string(stdout), "|", context.temp_allocator)
+	files = strings.split(string(stdout), "|", allocator)
 	for &file in files {
-		file = strings.trim_space(file)
+		file = strings.clone(strings.trim_space(file), allocator)
 	}
 	ok = true
 	return
 }
 
 @(require_results)
-dialog_file_save :: proc() -> (file: string, ok: bool) {
+_dialog_file_save :: proc(allocator: runtime.Allocator) -> (file: string, ok: bool) {
 	state, stdout, stderr, err := os.process_exec({
 		command = { "zenity", "--file-selection", "--save", },
 	}, context.temp_allocator)
@@ -63,7 +65,7 @@ dialog_file_save :: proc() -> (file: string, ok: bool) {
 		return
 	}
 
-	file = strings.trim_space(string(stdout))
+	file = strings.clone(strings.trim_space(string(stdout)), allocator)
 	ok   = true
 	return
 }
