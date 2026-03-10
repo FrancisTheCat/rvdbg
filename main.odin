@@ -172,7 +172,7 @@ main :: proc() {
 	glodin.init_glfw(window.handle)
 	defer glodin.uninit()
 
-	glfw.SwapInterval(0)
+	// glfw.SwapInterval(0)
 
 	CLEAR_COLOR :: UI_DEFAULT_THEME.colors[.Background]
 
@@ -235,13 +235,13 @@ main :: proc() {
 	glyph_cache.count = 6
 
 	clear_quad := []Font_Vertex {
-		{ position = { 0, 0, }, clear = -1, },
-		{ position = { 1, 0, }, clear = -1, },
-		{ position = { 0, 1, }, clear = -1, },
+		{ position = { 0, 0, }, },
+		{ position = { 1, 0, }, },
+		{ position = { 0, 1, }, },
 
-		{ position = { 1, 1, }, clear = -1, },
-		{ position = { 0, 1, }, clear = -1, },
-		{ position = { 1, 0, }, clear = -1, },
+		{ position = { 1, 1, }, },
+		{ position = { 0, 1, }, },
+		{ position = { 1, 0, }, },
 	}
 	glodin.set_mesh_data(glyph_cache.mesh, clear_quad)
 
@@ -478,14 +478,6 @@ main :: proc() {
 					offset = min,
 					scale  = max - min,
 				})
-
-				// append(&font_vertex_buffer, Font_Vertex { position = { min.x, min.y }, clear = -1, })
-				// append(&font_vertex_buffer, Font_Vertex { position = { max.x, min.y }, clear = -1, })
-				// append(&font_vertex_buffer, Font_Vertex { position = { max.x, max.y }, clear = -1, })
-
-				// append(&font_vertex_buffer, Font_Vertex { position = { min.x, min.y }, clear = -1, })
-				// append(&font_vertex_buffer, Font_Vertex { position = { max.x, max.y }, clear = -1, })
-				// append(&font_vertex_buffer, Font_Vertex { position = { min.x, max.y }, clear = -1, })
 			}
 		}
 

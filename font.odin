@@ -39,7 +39,6 @@ Glyph_Cache :: struct {
 
 Font_Vertex :: struct {
 	position: [2]f32,
-	clear:    f32,
 	bezier:   i32,
 }
 
