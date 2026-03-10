@@ -378,7 +378,6 @@ Ui_Measure_Text_Proc :: #type proc(
 
 Ui_Context :: struct {
 	// Output, read by the user
-	should_close:         bool,
 	cmds:                 [dynamic]Ui_Cmd,
 
 	// Input, set by ui_begin_frame
@@ -395,13 +394,13 @@ Ui_Context :: struct {
 	// Internal
 	using frame:          Ui_Frame,
 
-	popups:               [dynamic]Ui_Cmd,
 	measure_text:         Ui_Measure_Text_Proc,
 	user_pointer:         rawptr,
 	space_width:          f32,
 	mouse_last_move_time: f64,
 	frame_id:             int,
 	active_id:            u64,
+	active_popup:         u64,
 
 	theme:                Ui_Theme,
 
@@ -882,19 +881,23 @@ ui_tooltip_popup :: proc(ctx: ^Ui_Context, id: string) -> bool {
 
 @(require_results, deferred_in_out = ui_popup_end)
 ui_popup_toggle :: proc(ctx: ^Ui_Context, text: string) -> bool {
-	state := ui_state(ctx, text)
+	id    := ui_hash(text)
+	state := ui_state(ctx, id)
 	button_rect:    Ui_Rect
 	button_clicked: bool
-	if .Clicked in ui_button(ctx, text, out_rect = &button_rect) {
-		state.active  ~= true
-		button_clicked = true
 
-		if state.active {
-			state.first_shown = ctx.frame_id
+	if .Clicked in ui_button(ctx, text, out_rect = &button_rect) {
+		if ctx.active_popup == id {
+			ctx.active_popup = 0
+			return false
 		}
+
+		button_clicked    = true
+		ctx.active_popup  = id
+		state.first_shown = ctx.frame_id
 	}
 
-	if !state.active {
+	if ctx.active_popup != id {
 		return false
 	}
 
@@ -925,13 +928,14 @@ ui_popup_end :: proc(ctx: ^Ui_Context, text: string, show: bool) {
 		return
 	}
 
-	state     := ui_state(ctx, text)
+	id        := ui_hash(text)
+	state     := ui_state(ctx, id)
 	state.size = ctx.extents.max - ctx.extents.min
 
-	if state.first_shown != ctx.frame_id && ctx.mouse_buttons[0] == .Just_Clicked || .Escape in ctx.keys_pressed {
+	if (state.first_shown != ctx.frame_id && ctx.mouse_buttons[0] == .Just_Clicked && !ui_rect_contains(ctx.extents, ctx.mouse_position)) || .Escape in ctx.keys_pressed {
 		// the user just clicked somewhere else, so we should close the popup
 		// note that this does not work for nested popups and will need to be handled differently
-		state.active = false
+		ctx.active_popup = 0
 	}
 
 	ctx.mouse_position = min(int)
@@ -945,6 +949,10 @@ ui_popup_end :: proc(ctx: ^Ui_Context, text: string, show: bool) {
 	frame    := pop(&ctx.stack)
 	ctx.frame = frame
 	ctx.z    -= 1
+}
+
+ui_popup_close :: proc(ctx: ^Ui_Context) {
+	ctx.active_popup = 0
 }
 
 _ui_slider :: proc(
@@ -1050,11 +1058,8 @@ ui_begin_frame :: proc(
 
 	ctx.frame_id += 1
 	clear(&ctx.cmds)
-	clear(&ctx.popups)
-	ctx.max.x = width
-	ctx.max.y = height
-	ctx.min   = ctx.theme.padding
-	ctx.max  -= ctx.theme.padding
+	ctx.max = { width, height, } - ctx.theme.padding
+	ctx.min = ctx.theme.padding
 	if mouse_buttons[0] == .Just_Clicked {
 		ctx.active_id = 0
 	}
@@ -1085,15 +1090,14 @@ ui_context_init :: proc(
 	ctx:          ^Ui_Context,
 	measure_text: Ui_Measure_Text_Proc,
 	user_pointer: rawptr,
-	theme        := UI_DEFAULT_THEME,
-	allocator    := context.allocator,
+	theme     := UI_DEFAULT_THEME,
+	allocator := context.allocator,
 ) {
 	ctx.theme        = theme
 	ctx.measure_text = measure_text
 	ctx.user_pointer = user_pointer
 
 	ctx.cmds.allocator   = allocator
-	ctx.popups.allocator = allocator
 	ctx.stack.allocator  = allocator
 	ctx.state.allocator  = allocator
 
@@ -1103,7 +1107,6 @@ ui_context_init :: proc(
 
 ui_context_destroy:: proc(ctx: ^Ui_Context) {
 	delete(ctx.cmds)
-	delete(ctx.popups)
 	delete(ctx.stack)
 	delete(ctx.state)
 	virtual.arena_destroy(&ctx.state_arena)

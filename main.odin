@@ -15,11 +15,11 @@ import     "core:time"
 import     "core:terminal/ansi"
 import     "core:unicode/utf8"
 
-import "glodin"
-import "input"
+import     "glodin"
+import     "input"
+import ttf "odin-ttf"
 
-import       "vendor:glfw"
-import stbtt "vendor:stb/truetype"
+import "vendor:glfw"
 
 string_replace_tabs :: proc(input: string, allocator := context.allocator) -> string {
 	builder := strings.builder_make(allocator)
@@ -124,7 +124,7 @@ main :: proc() {
 			fmt.printf("bad free: %v", bad.location)
 		}
 	}
-	
+
 	mem, err := virtual.reserve_and_commit(1 << 32 + 3)
 	assert(err == nil)
 
@@ -133,6 +133,7 @@ main :: proc() {
 
 	debugger.focused_address = debugger.cpu.pc
 	debugger.register_names  = true
+	debugger.subpixel        = true
 	debugger.state           = .Debugger_Paused
 
 	rb.init(&debugger.breakpoints)
@@ -150,17 +151,32 @@ main :: proc() {
 	assert(bool(ok), "glfw.Init")
 	defer glfw.Terminate()
 
-	window := glfw.CreateWindow(900, 600, "", nil, nil)
-	defer glfw.DestroyWindow(window)
+	window: struct {
+		size:         [2]int, // actual framebuffer size
+		virtual_size: [2]int, // "virtual" window size, before scaling
+		handle:       glfw.WindowHandle,
+	} = {
+		virtual_size = { 900, 600, },
+	}
 
-	input.init(window)
+	window.handle = glfw.CreateWindow(i32(window.virtual_size.x), i32(window.virtual_size.y), "", nil, nil)
+	defer glfw.DestroyWindow(window.handle)
 
-	glodin.init_glfw(window)
+	{
+		w, h       := glfw.GetFramebufferSize(window.handle)
+		window.size = { int(w), int(h), }
+	}
+
+	input.init(window.handle)
+
+	glodin.init_glfw(window.handle)
 	defer glodin.uninit()
+
+	glfw.SwapInterval(0)
 
 	CLEAR_COLOR :: UI_DEFAULT_THEME.colors[.Background]
 
-	glodin.window_size_callback(900, 600)
+	glodin.window_size_callback(window.size.x, window.size.y)
 	glodin.clear_color(0, CLEAR_COLOR)
 
 	program := glodin.create_program_file("vertex.glsl", "fragment.glsl") or_else panic("Failed to compile program")
@@ -170,13 +186,8 @@ main :: proc() {
 	defer delete(atlas_pixels)
 
 	fonts: [Ui_Font]Font
-	for &font in fonts {
-		font.characters = make([]stbtt.bakedchar, 256)
-	}
-
 	defer for font in fonts {
-		delete(font.characters)
-		glodin.destroy(font.texture)
+		delete(font.data)
 	}
 
 	glodin.enable(.Blend)
@@ -203,50 +214,136 @@ main :: proc() {
 	prev_mouse_position: [2]int
 	prev_text_height := -1
 
-	for !glfw.WindowShouldClose(window) && !ui_ctx.should_close {
+	GLYPH_CACHE_SIZE :: 1 << 20 // this is 16Mb worth of data, that should be plenty
+	glyph_cache: Glyph_Cache = {
+		glyphs = make(map[struct{ rune, ^Font, }]Glyph_Cache_Entry, context.allocator),
+		mesh   = glodin.create_mesh((([^]Font_Vertex)(nil))[:GLYPH_CACHE_SIZE]),
+	}
+	defer {
+		delete(glyph_cache.glyphs)
+		delete(glyph_cache.vertex_buffer)
+		glodin.destroy(glyph_cache.mesh)
+	}
+
+	glyph_cache.glyphs[{}] = {
+		draw_command = {
+			count          = 6,
+			instance_count = 1,
+			first_vertex   = 0,
+		},
+	}
+	glyph_cache.count = 6
+
+	clear_quad := []Font_Vertex {
+		{ position = { 0, 0, }, clear = -1, },
+		{ position = { 1, 0, }, clear = -1, },
+		{ position = { 0, 1, }, clear = -1, },
+
+		{ position = { 1, 1, }, clear = -1, },
+		{ position = { 0, 1, }, clear = -1, },
+		{ position = { 1, 0, }, clear = -1, },
+	}
+	glodin.set_mesh_data(glyph_cache.mesh, clear_quad)
+
+	font_program := glodin.create_program_source(#load("font_vertex.glsl"), #load("font_fragment.glsl")) or_else panic("Failed to compile program")
+	defer glodin.destroy(font_program)
+
+	SAMPLES :: 4
+
+	render_width := window.size.x
+	if debugger.subpixel {
+		render_width *= 3
+	}
+
+	stencil_texture := glodin.create_texture(render_width, window.size.y, format = .Stencil8, samples = SAMPLES)
+	defer glodin.destroy(stencil_texture)
+
+	// add a color texture to prevent renderdoc from shitting itself
+	color_texture := glodin.create_texture(render_width, window.size.y, format = .RGBA8, samples = SAMPLES)
+	defer glodin.destroy(color_texture)
+
+	fb := glodin.create_framebuffer({ color_texture, }, stencil_texture = stencil_texture)
+	defer glodin.destroy(fb)
+
+	glodin.set_uniforms(program, {
+		{ "u_font_stencil",  stencil_texture,                 },
+		{ "u_resolution",    la.array_cast(window.size, f32), },
+		{ "u_font_samples",  u32(SAMPLES),                    },
+		{ "u_font_subpixel", debugger.subpixel,               },
+	})
+
+	glodin.disable(.Cull_Face)
+	glodin.set_stencil_op(.Keep, .Keep, .Incr_Wrap, .Front)
+	glodin.set_stencil_op(.Keep, .Keep, .Zero, .Back)
+
+	glodin.set_min_sample_shading(1)
+
+	prev_subpixel := debugger.subpixel
+
+	last_print_time    := time.now()
+	frames_since_print := 0
+
+	for &font, font_id in fonts {
+		font.data        = os.read_entire_file(FONT_PATHS[font_id], context.allocator) or_else panic("Failed to open font file")
+		font.font        = ttf.load(font.data) or_else panic("Failed to load font")
+		font.font_height = f32(ui_ctx.theme.text_height)
+		font.scale       = ttf.font_height_to_scale(font.font, font.font_height)
+	}
+
+	GLYPH_BUFFER_SIZE :: 1 << 20
+	indirect_buffer := glodin.create_indirect_buffer(GLYPH_BUFFER_SIZE, size_of(glodin.Draw_Arrays_Indirect_Command))
+	defer glodin.destroy(indirect_buffer)
+
+	draw_glyphs: [dynamic]glodin.Draw_Arrays_Indirect_Command
+	defer delete(draw_glyphs)
+	draw_data: [dynamic]Glyph_Draw_Data
+	defer delete(draw_data)
+
+	for !glfw.WindowShouldClose(window.handle) && !debugger.should_close {
+		frames_since_print += 1
+		if time.since(last_print_time) > time.Second {
+			glfw.SetWindowTitle(window.handle, fmt.ctprintf("%v", frames_since_print))
+			frames_since_print = 0
+			last_print_time    = time.now()
+		}
+
 		if ui_ctx.theme.text_height != prev_text_height {
-			for font_path, font_id in FONT_PATHS {
-				font_data := os.read_entire_file(font_path, context.temp_allocator) or_else panic("Failed to open font file")
-
-				font_info: stbtt.fontinfo
-				stbtt.InitFont(&font_info, raw_data(font_data), 0)
-
-				ascent, descent: i32
-				stbtt.GetFontVMetrics(&font_info, &ascent, &descent, nil)
-
-				// This is the most accurate way to get glyph height to my knowledge and yes, that is insane
-				cap_height: i32
-				stbtt.GetCodepointBox(&font_info, 'H', nil, nil, nil, &cap_height)
-				assert(cap_height > 0)
-
-				scale        := f32(ui_ctx.theme.text_height) / f32(cap_height)
-				pixel_height := f32(ascent - descent) * scale
-
-				result := stbtt.BakeFontBitmap(
-					raw_data(font_data),
-					0,
-					pixel_height,
-					raw_data(atlas_pixels),
-					ATLAS_RESOLUTION,
-					ATLAS_RESOLUTION,
-					0,
-					256,
-					raw_data(fonts[font_id].characters),
-				)
-				assert(result > 0)
-
-				if fonts[font_id].texture != 0 {
-					glodin.destroy(fonts[font_id].texture)
-				}
-				fonts[font_id].texture = glodin.create_texture_with_data(
-					ATLAS_RESOLUTION,
-					ATLAS_RESOLUTION,
-					atlas_pixels,
-					mag_filter = .Nearest,
-					min_filter = .Nearest,
-				)
+			for &font in fonts {
+				font.font_height = f32(ui_ctx.theme.text_height)
+				font.scale       = ttf.font_height_to_scale(font.font, font.font_height)
 			}
 			prev_text_height = ui_ctx.theme.text_height
+		}
+
+		{
+			new_x, new_y := glfw.GetFramebufferSize(window.handle)
+			if int(new_x) != window.size.x || int(new_y) != window.size.y || debugger.subpixel != prev_subpixel {
+				glodin.destroy(stencil_texture)
+				glodin.destroy(fb)
+
+				window.size = { int(new_x), int(new_y), }
+
+				render_width := window.size.x
+				if debugger.subpixel {
+					render_width *= 3
+				}
+
+				stencil_texture = glodin.create_texture(render_width, window.size.y, format = .Stencil8, samples = SAMPLES)
+
+				glodin.destroy(color_texture)
+				color_texture = glodin.create_texture(render_width, window.size.y, format = .RGBA8, samples = SAMPLES)
+
+				fb = glodin.create_framebuffer({ color_texture, }, stencil_texture = stencil_texture)
+
+				glodin.set_uniforms(program, {
+					{ "u_font_stencil",  stencil_texture,                 },
+					{ "u_resolution",    la.array_cast(window.size, f32), },
+					{ "u_font_samples",  u32(SAMPLES),                    },
+					{ "u_font_subpixel", debugger.subpixel,               },
+				})
+
+				prev_subpixel = debugger.subpixel
+			}
 		}
 
 		mouse_position     := la.array_cast(input.get_mouse_position(), int)
@@ -317,12 +414,17 @@ main :: proc() {
 			keys^ |= { k, }
 		}
 
-		w, h := glfw.GetFramebufferSize(window)
+		{
+			w, h               := glfw.GetWindowSize(window.handle)
+			window.virtual_size = { int(w), int(h), }
+		}
+
+		scale := la.array_cast(window.size, f32) / la.array_cast(window.virtual_size, f32)
 
 		ui_begin_frame(
 			&ui_ctx,
-			int(w),
-			int(h),
+			window.virtual_size.x,
+			window.virtual_size.y,
 			mouse_position,
 			mouse_delta,
 			la.array_cast(input.get_scroll(), int),
@@ -338,42 +440,86 @@ main :: proc() {
 
 		glodin.clear_color(0, CLEAR_COLOR)
 
-		glodin.set_uniforms(program, {
-			{ "u_window_size",     glm.vec2{ f32(w), f32(h), }, },
-			{ "u_atlas_interface", fonts[.Interface].texture,   },
-			{ "u_atlas_monospace", fonts[.Monospace].texture,   },
-		})
+		clear(&draw_data)
+		clear(&draw_glyphs)
+		clear(&instance_buffer)
 
 		for cmd in ui_get_draw_commands(ui_ctx) {
 			switch cmd in cmd {
 			case Ui_Cmd_Text:
 				draw_string(
 					&instance_buffer,
-					fonts[cmd.font],
-					i32(cmd.font),
+					&glyph_cache,
+					&draw_glyphs,
+					&draw_data,
+					&fonts[cmd.font],
 					cmd.text,
 					{ f32(cmd.position.x), f32(cmd.position.y), },
+					fonts[cmd.font].scale,
 					cmd.color,
 				)
 			case Ui_Cmd_Rect:
 				rect := cmd.rect
+				if rect.min.x > rect.max.x || rect.min.y > rect.max.y {
+					break
+				}
+
 				append(&instance_buffer, Instance_Data {
-					rect                = { f32(rect.min.x), f32(rect.min.y), f32(rect.max.x), f32(rect.max.y), },
+					rect                = [4]f32{ f32(rect.min.x), f32(rect.min.y), f32(rect.max.x), f32(rect.max.y), },
 					color               = cmd.color,
 					border_color        = cmd.border.color,
-					border_width_radius = { f32(cmd.border.width), f32(cmd.border.radius), },
+					border_width_radius = [2]f32{ f32(cmd.border.width), f32(cmd.border.radius), } * scale.y, // not correct when we are scaled non-uniformly, but do we really care?
 				})
+
+				min := la.array_cast(rect.min, f32)
+				max := la.array_cast(rect.max, f32)
+				append(&draw_glyphs, glyph_cache.glyphs[{}].draw_command)
+				append(&draw_data, Glyph_Draw_Data {
+					offset = min,
+					scale  = max - min,
+				})
+
+				// append(&font_vertex_buffer, Font_Vertex { position = { min.x, min.y }, clear = -1, })
+				// append(&font_vertex_buffer, Font_Vertex { position = { max.x, min.y }, clear = -1, })
+				// append(&font_vertex_buffer, Font_Vertex { position = { max.x, max.y }, clear = -1, })
+
+				// append(&font_vertex_buffer, Font_Vertex { position = { min.x, min.y }, clear = -1, })
+				// append(&font_vertex_buffer, Font_Vertex { position = { max.x, max.y }, clear = -1, })
+				// append(&font_vertex_buffer, Font_Vertex { position = { min.x, max.y }, clear = -1, })
 			}
 		}
 
-		mesh := glodin.create_instanced_mesh(quad, instance_buffer[:])
-		defer glodin.destroy(mesh)
+		glodin.set_indirect_buffer_data(indirect_buffer, draw_glyphs[:])
 
-		glodin.draw({}, program, mesh)
+		draw_data_buffer := glodin.create_uniform_buffer(draw_data[:])
+		defer glodin.destroy(draw_data_buffer)
 
-		clear(&instance_buffer)
+		glodin.set_uniform(font_program, "draw_command_ssbo", draw_data_buffer)
+		glodin.set_uniform(font_program, "u_scale", scale)
+		glodin.set_uniform(program,      "u_scale", scale)
 
-		glfw.SwapBuffers(window)
+		{
+			glodin.clear_stencil(fb, 0)
+			glodin.clear_depth(fb, 0)
+
+			glodin.enable(.Stencil_Test)
+			defer glodin.disable(.Stencil_Test)
+
+			glodin.enable(.Sample_Shading)
+			defer glodin.disable(.Sample_Shading)
+
+			glodin.set_uniform(font_program, "u_resolution", la.array_cast(window.size, f32))
+
+			glodin.draw(fb, font_program, glyph_cache.mesh, indirect = indirect_buffer, count = len(draw_glyphs))
+		}
+
+		{
+			mesh := glodin.create_instanced_mesh(quad, instance_buffer[:])
+			defer glodin.destroy(mesh)
+			glodin.draw({}, program, mesh)
+		}
+
+		glfw.SwapBuffers(window.handle)
 
 		input.poll()
 		glfw.PollEvents()
@@ -386,7 +532,7 @@ Instance_Data :: struct {
 	rect, tex_rect:      glm.vec4,
 	color, border_color: glm.vec4,
 	border_width_radius: glm.vec2,
-	texture:             i32,
+	has_font:            i32,
 }
 
 vertex_buffer: []Vertex_2D = {
@@ -417,6 +563,8 @@ Debugger :: struct {
 	watch_window:    Watch_Window,
 	last_error:      string,
 	file_path:       string,
+	should_close:    bool,
+	subpixel:        bool,
 }
 
 debugger_ui :: proc(ctx: ^Ui_Context, debugger: ^Debugger) {
@@ -444,18 +592,21 @@ debugger_ui :: proc(ctx: ^Ui_Context, debugger: ^Debugger) {
 				if ok && debugger_load_file(debugger, path) {
 					warp_focus = true
 				}
+				ui_popup_close(ctx)
 			}
 			if .Clicked in ui_button(ctx, "Open Directory") {
 				file, ok := dialog_file_open(true)
 				if ok {
 					fmt.println(file)
 				}
+				ui_popup_close(ctx)
 			}
 			if .Clicked in ui_button(ctx, "Save") {
 				file, ok := dialog_file_save()
 				if ok {
 					fmt.println(file)
 				}
+				ui_popup_close(ctx)
 			}
 		}
 
@@ -477,7 +628,7 @@ debugger_ui :: proc(ctx: ^Ui_Context, debugger: ^Debugger) {
 					ui_label(ctx, name, min_size = &min_size)
 					max_width = max(max_width, min_size.x)
 					ctx.min_size.x = 0
-					ui_slider(ctx, value, 0, 20)
+					ui_slider(ctx, value, 0, 100)
 				}
 			}
 
@@ -492,22 +643,26 @@ debugger_ui :: proc(ctx: ^Ui_Context, debugger: ^Debugger) {
 				ctx.theme = UI_DEFAULT_THEME
 			}
 			debugger.register_names ~= .Clicked in ui_button(ctx, "Register Names")
+			debugger.subpixel       ~= .Clicked in ui_button(ctx, "Subpixel Rendering")
 		}
 
 		if ui_popup_toggle(ctx, "Run") {
 			if .Clicked in ui_button(ctx, "Run") {
 				debugger.state = .Running
+				ui_popup_close(ctx)
 			}
 			if .Clicked in ui_button(ctx, "Step") {
 				step = true
 			}
 			if .Clicked in ui_button(ctx, "Pause") {
 				debugger.state = .Debugger_Paused
+				ui_popup_close(ctx)
 			}
 			if .Clicked in ui_button(ctx, "Reset") {
 				if debugger_load_file(debugger, debugger.file_path) {
 					warp_focus = true
 				}
+				ui_popup_close(ctx)
 			}
 		}
 
@@ -518,7 +673,7 @@ debugger_ui :: proc(ctx: ^Ui_Context, debugger: ^Debugger) {
 		ctx.direction = .Left
 		size := ctx.theme.text_height + ctx.theme.text_padding * 2
 		if .Clicked in ui_color_button(ctx, size, CLOSE_COLOR) {
-			ctx.should_close = true
+			debugger.should_close = true
 		}
 		if .Clicked in ui_color_button(ctx, size, MAXIMIZE_COLOR) {
 			unimplemented()
