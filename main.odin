@@ -1,6 +1,7 @@
 package rvdbg
 
 import "base:intrinsics"
+import "base:runtime"
 
 import rb  "core:container/rbtree"
 import     "core:fmt"
@@ -14,6 +15,7 @@ import     "core:strings"
 import     "core:time"
 import     "core:terminal/ansi"
 import     "core:unicode/utf8"
+import     "core:prof/spall"
 
 import     "glodin"
 import     "input"
@@ -110,6 +112,24 @@ debugger_load_program :: proc(debugger: ^Debugger, source: string) {
 	cpu_load_sections(&debugger.cpu, sections)
 }
 
+ENABLE_SPALL :: #config(ENABLE_SPALL, false)
+
+when ENABLE_SPALL {
+	spall_ctx:    spall.Context
+	spall_buffer: spall.Buffer
+
+	@(instrumentation_enter)
+	spall_enter :: proc "contextless" (proc_address, call_site_return_address: rawptr, loc: runtime.Source_Code_Location) {
+		spall._buffer_begin(&spall_ctx, &spall_buffer, "", "", loc)
+	}
+
+	@(instrumentation_exit)
+	spall_exit :: proc "contextless" (proc_address, call_site_return_address: rawptr, loc: runtime.Source_Code_Location) {
+		spall._buffer_end(&spall_ctx, &spall_buffer)
+	}
+}
+
+
 main :: proc() {
 	when ODIN_DEBUG {
 		track: mem.Tracking_Allocator
@@ -125,6 +145,17 @@ main :: proc() {
 		}
 	}
 
+	when ENABLE_SPALL {
+		spall_ctx = spall.context_create("trace.spall")
+		defer spall.context_destroy(&spall_ctx)
+
+		buffer_backing := make([]u8, spall.BUFFER_DEFAULT_SIZE)
+		defer delete(buffer_backing)
+
+		spall_buffer = spall.buffer_create(buffer_backing)
+		defer spall.buffer_destroy(&spall_ctx, &spall_buffer)
+	}
+
 	mem, err := virtual.reserve_and_commit(1 << 32 + 3)
 	assert(err == nil)
 
@@ -135,6 +166,7 @@ main :: proc() {
 	debugger.register_names  = true
 	debugger.subpixel        = true
 	debugger.state           = .Debugger_Paused
+	debugger.font_quality    = 2
 
 	rb.init(&debugger.breakpoints)
 
@@ -174,23 +206,19 @@ main :: proc() {
 
 	// glfw.SwapInterval(0)
 
-	CLEAR_COLOR :: UI_DEFAULT_THEME.colors[.Background]
-
 	glodin.window_size_callback(window.size.x, window.size.y)
-	glodin.clear_color(0, CLEAR_COLOR)
 
-	program := glodin.create_program_file("vertex.glsl", "fragment.glsl") or_else panic("Failed to compile program")
+	program := glodin.create_program_source(#load("vertex.glsl"), #load("fragment.glsl")) or_else panic("Failed to compile program")
 	defer glodin.destroy(program)
-
-	atlas_pixels := make([]u8, ATLAS_RESOLUTION * ATLAS_RESOLUTION)
-	defer delete(atlas_pixels)
 
 	fonts: [Ui_Font]Font
 	defer for font in fonts {
 		delete(font.data)
 	}
-
-	glodin.enable(.Blend)
+	for &font, font_id in fonts {
+		font.data = os.read_entire_file(FONT_PATHS[font_id], context.allocator) or_else panic("Failed to open font file")
+		font.font = ttf.load(font.data) or_else panic("Failed to load font")
+	}
 
 	ui_ctx: Ui_Context
 	ui_context_init(
@@ -202,102 +230,44 @@ main :: proc() {
 	)
 	defer ui_context_destroy(&ui_ctx)
 
-	quad := glodin.create_mesh(vertex_buffer[:])
-	defer glodin.destroy_mesh(quad)
+	glodin.clear_color({}, ui_ctx.theme.colors[.Background])
 
-	instance_buffer := make([dynamic]Instance_Data, context.allocator)
-	defer delete(instance_buffer)
-
-	start_time := time.now()
-
-	prev_time: f64
-	prev_mouse_position: [2]int
-	prev_text_height := -1
-
-	GLYPH_CACHE_SIZE :: 1 << 20 // this is 16Mb worth of data, that should be plenty
-	glyph_cache: Glyph_Cache = {
-		glyphs = make(map[struct{ rune, ^Font, }]Glyph_Cache_Entry, context.allocator),
-		mesh   = glodin.create_mesh((([^]Font_Vertex)(nil))[:GLYPH_CACHE_SIZE]),
-	}
-	defer {
-		delete(glyph_cache.glyphs)
-		delete(glyph_cache.vertex_buffer)
-		glodin.destroy(glyph_cache.mesh)
+	Vertex_2D :: struct {
+		position: glm.vec2,
 	}
 
-	glyph_cache.glyphs[{}] = {
-		draw_command = {
-			count          = 6,
-			instance_count = 1,
-			first_vertex   = 0,
-		},
-	}
-	glyph_cache.count = 6
-
-	clear_quad := []Font_Vertex {
+	quad_vertex_buffer: []Vertex_2D = {
 		{ position = { 0, 0, }, },
-		{ position = { 1, 0, }, },
 		{ position = { 0, 1, }, },
+		{ position = { 1, 0, }, },
 
 		{ position = { 1, 1, }, },
 		{ position = { 0, 1, }, },
 		{ position = { 1, 0, }, },
 	}
-	glodin.set_mesh_data(glyph_cache.mesh, clear_quad)
 
-	font_program := glodin.create_program_source(#load("font_vertex.glsl"), #load("font_fragment.glsl")) or_else panic("Failed to compile program")
-	defer glodin.destroy(font_program)
+	quad := glodin.create_mesh(quad_vertex_buffer[:])
+	defer glodin.destroy_mesh(quad)
 
-	SAMPLES :: 4
-
-	render_width := window.size.x
-	if debugger.subpixel {
-		render_width *= 3
-	}
-
-	stencil_texture := glodin.create_texture(render_width, window.size.y, format = .Stencil8, samples = SAMPLES)
-	defer glodin.destroy(stencil_texture)
-
-	// add a color texture to prevent renderdoc from shitting itself
-	color_texture := glodin.create_texture(render_width, window.size.y, format = .RGBA8, samples = SAMPLES)
-	defer glodin.destroy(color_texture)
-
-	fb := glodin.create_framebuffer({ color_texture, }, stencil_texture = stencil_texture)
-	defer glodin.destroy(fb)
-
-	glodin.set_uniforms(program, {
-		{ "u_font_stencil",  stencil_texture,                 },
-		{ "u_resolution",    la.array_cast(window.size, f32), },
-		{ "u_font_samples",  u32(SAMPLES),                    },
-		{ "u_font_subpixel", debugger.subpixel,               },
-	})
+	instance_buffer := make([dynamic]Instance_Data, context.allocator)
+	defer delete(instance_buffer)
 
 	glodin.disable(.Cull_Face)
 	glodin.set_stencil_op(.Keep, .Keep, .Incr_Wrap, .Front)
 	glodin.set_stencil_op(.Keep, .Keep, .Zero, .Back)
-
 	glodin.set_min_sample_shading(1)
 
-	prev_subpixel := debugger.subpixel
+	font_draw_ctx: Font_Draw_Context
+	font_draw_context_init(&font_draw_ctx)
+	defer font_draw_context_destroy(font_draw_ctx)
 
 	last_print_time    := time.now()
 	frames_since_print := 0
 
-	for &font, font_id in fonts {
-		font.data        = os.read_entire_file(FONT_PATHS[font_id], context.allocator) or_else panic("Failed to open font file")
-		font.font        = ttf.load(font.data) or_else panic("Failed to load font")
-		font.font_height = f32(ui_ctx.theme.text_height)
-		font.scale       = ttf.font_height_to_scale(font.font, font.font_height)
-	}
+	prev_time: f64
+	prev_mouse_position: [2]int
 
-	GLYPH_BUFFER_SIZE :: 1 << 20
-	indirect_buffer := glodin.create_indirect_buffer(GLYPH_BUFFER_SIZE, size_of(glodin.Draw_Arrays_Indirect_Command))
-	defer glodin.destroy(indirect_buffer)
-
-	draw_glyphs: [dynamic]glodin.Draw_Arrays_Indirect_Command
-	defer delete(draw_glyphs)
-	draw_data: [dynamic]Glyph_Draw_Data
-	defer delete(draw_data)
+	start_time := time.now()
 
 	for !glfw.WindowShouldClose(window.handle) && !debugger.should_close {
 		frames_since_print += 1
@@ -307,6 +277,8 @@ main :: proc() {
 			last_print_time    = time.now()
 		}
 
+		@(static)
+		prev_text_height := -1
 		if ui_ctx.theme.text_height != prev_text_height {
 			for &font in fonts {
 				font.font_height = f32(ui_ctx.theme.text_height)
@@ -316,35 +288,14 @@ main :: proc() {
 		}
 
 		{
-			new_x, new_y := glfw.GetFramebufferSize(window.handle)
-			if int(new_x) != window.size.x || int(new_y) != window.size.y || debugger.subpixel != prev_subpixel {
-				glodin.destroy(stencil_texture)
-				glodin.destroy(fb)
+			fx, fy     := glfw.GetFramebufferSize(window.handle)
+			window.size = { int(fx), int(fy), }
 
-				window.size = { int(new_x), int(new_y), }
-
-				render_width := window.size.x
-				if debugger.subpixel {
-					render_width *= 3
-				}
-
-				stencil_texture = glodin.create_texture(render_width, window.size.y, format = .Stencil8, samples = SAMPLES)
-
-				glodin.destroy(color_texture)
-				color_texture = glodin.create_texture(render_width, window.size.y, format = .RGBA8, samples = SAMPLES)
-
-				fb = glodin.create_framebuffer({ color_texture, }, stencil_texture = stencil_texture)
-
-				glodin.set_uniforms(program, {
-					{ "u_font_stencil",  stencil_texture,                 },
-					{ "u_resolution",    la.array_cast(window.size, f32), },
-					{ "u_font_samples",  u32(SAMPLES),                    },
-					{ "u_font_subpixel", debugger.subpixel,               },
-				})
-
-				prev_subpixel = debugger.subpixel
-			}
+			ww, wh             := glfw.GetWindowSize(window.handle)
+			window.virtual_size = { int(ww), int(wh), }
 		}
+
+		scale := la.array_cast(window.size, f32) / la.array_cast(window.virtual_size, f32)
 
 		mouse_position     := la.array_cast(input.get_mouse_position(), int)
 		mouse_delta        := mouse_position - prev_mouse_position
@@ -414,13 +365,6 @@ main :: proc() {
 			keys^ |= { k, }
 		}
 
-		{
-			w, h               := glfw.GetWindowSize(window.handle)
-			window.virtual_size = { int(w), int(h), }
-		}
-
-		scale := la.array_cast(window.size, f32) / la.array_cast(window.virtual_size, f32)
-
 		ui_begin_frame(
 			&ui_ctx,
 			window.virtual_size.x,
@@ -438,20 +382,14 @@ main :: proc() {
 
 		debugger_ui(&ui_ctx, &debugger)
 
-		glodin.clear_color(0, CLEAR_COLOR)
-
-		clear(&draw_data)
-		clear(&draw_glyphs)
 		clear(&instance_buffer)
 
 		for cmd in ui_get_draw_commands(ui_ctx) {
 			switch cmd in cmd {
 			case Ui_Cmd_Text:
 				draw_string(
+					&font_draw_ctx,
 					&instance_buffer,
-					&glyph_cache,
-					&draw_glyphs,
-					&draw_data,
 					&fonts[cmd.font],
 					cmd.text,
 					{ f32(cmd.position.x), f32(cmd.position.y), },
@@ -473,41 +411,30 @@ main :: proc() {
 
 				min := la.array_cast(rect.min, f32)
 				max := la.array_cast(rect.max, f32)
-				append(&draw_glyphs, glyph_cache.glyphs[{}].draw_command)
-				append(&draw_data, Glyph_Draw_Data {
-					offset = min,
-					scale  = max - min,
-				})
+				draw_font_clear_quad(&font_draw_ctx, min, max)
 			}
 		}
 
-		glodin.set_indirect_buffer_data(indirect_buffer, draw_glyphs[:])
-
-		draw_data_buffer := glodin.create_uniform_buffer(draw_data[:])
-		defer glodin.destroy(draw_data_buffer)
-
-		glodin.set_uniform(font_program, "draw_command_ssbo", draw_data_buffer)
-		glodin.set_uniform(font_program, "u_scale", scale)
-		glodin.set_uniform(program,      "u_scale", scale)
+		font_samples := 1 << uint(debugger.font_quality)
+		font_draw_context_draw(&font_draw_ctx, window.size, scale, font_samples, debugger.subpixel)
 
 		{
-			glodin.clear_stencil(fb, 0)
-			glodin.clear_depth(fb, 0)
+			glodin.enable(.Blend)
+			defer glodin.disable(.Blend)
 
-			glodin.enable(.Stencil_Test)
-			defer glodin.disable(.Stencil_Test)
+			glodin.clear_color({}, ui_ctx.theme.colors[.Background])
 
-			glodin.enable(.Sample_Shading)
-			defer glodin.disable(.Sample_Shading)
-
-			glodin.set_uniform(font_program, "u_resolution", la.array_cast(window.size, f32))
-
-			glodin.draw(fb, font_program, glyph_cache.mesh, indirect = indirect_buffer, count = len(draw_glyphs))
-		}
-
-		{
 			mesh := glodin.create_instanced_mesh(quad, instance_buffer[:])
 			defer glodin.destroy(mesh)
+
+			glodin.set_uniforms(program, {
+				{ "u_font_stencil",  font_draw_ctx.stencil_texture,   },
+				{ "u_resolution",    la.array_cast(window.size, f32), },
+				{ "u_font_samples",  u32(font_samples),               },
+				{ "u_font_subpixel", debugger.subpixel,               },
+				{ "u_scale" ,        scale,                           },
+			})
+
 			glodin.draw({}, program, mesh)
 		}
 
@@ -527,20 +454,6 @@ Instance_Data :: struct {
 	has_font:            i32,
 }
 
-vertex_buffer: []Vertex_2D = {
-	{ position = { 0, 0, }, },
-	{ position = { 0, 1, }, },
-	{ position = { 1, 0, }, },
-
-	{ position = { 1, 1, }, },
-	{ position = { 0, 1, }, },
-	{ position = { 1, 0, }, },
-}
-
-Vertex_2D :: struct {
-	position: glm.vec2,
-}
-
 Debugger :: struct {
 	cpu:             CPU,
 	state:           CPU_State,
@@ -557,6 +470,8 @@ Debugger :: struct {
 	file_path:       string,
 	should_close:    bool,
 	subpixel:        bool,
+	font_quality:    int,
+	glyph_count:     int,
 }
 
 debugger_ui :: proc(ctx: ^Ui_Context, debugger: ^Debugger) {
@@ -612,7 +527,7 @@ debugger_ui :: proc(ctx: ^Ui_Context, debugger: ^Debugger) {
 			last_max_width := max_width
 			max_width       = 0
 
-			named_slider :: proc(ctx: ^Ui_Context, name: string, value: ^int) {
+			named_slider :: proc(ctx: ^Ui_Context, name: string, value: ^int, min_value, max_value: int) {
 				if ui_section(ctx, name, .Down, {}) {
 					ctx.direction = .Right
 
@@ -620,16 +535,17 @@ debugger_ui :: proc(ctx: ^Ui_Context, debugger: ^Debugger) {
 					ui_label(ctx, name, min_size = &min_size)
 					max_width = max(max_width, min_size.x)
 					ctx.min_size.x = 0
-					ui_slider(ctx, value, 0, 100)
+					ui_slider(ctx, value, min_value, max_value)
 				}
 			}
 
 			ctx.min_size.x = last_max_width
-			named_slider(ctx, "Padding",       &ctx.theme.padding)
-			named_slider(ctx, "Text Padding",  &ctx.theme.text_padding)
-			named_slider(ctx, "Border Width",  &ctx.theme.border_width)
-			named_slider(ctx, "Border Radius", &ctx.theme.border_radius)
-			named_slider(ctx, "Text Height",   &ctx.theme.text_height)
+			named_slider(ctx, "Padding",       &ctx.theme.padding,       0, 20)
+			named_slider(ctx, "Text Padding",  &ctx.theme.text_padding,  0, 20)
+			named_slider(ctx, "Border Width",  &ctx.theme.border_width,  1, 10)
+			named_slider(ctx, "Border Radius", &ctx.theme.border_radius, 0, 20)
+			named_slider(ctx, "Text Height",   &ctx.theme.text_height,   0, 20)
+			named_slider(ctx, "Font Quality",  &debugger.font_quality,   1,  3)
 
 			if .Clicked in ui_button(ctx, "Reset Theme") {
 				ctx.theme = UI_DEFAULT_THEME
@@ -861,8 +777,8 @@ debugger_ui :: proc(ctx: ^Ui_Context, debugger: ^Debugger) {
 		text_height: Maybe(int) = nil,
 	) {
 		text_height := text_height.? or_else ctx.theme.text_height
-		width       := ctx.measure_text(.Interface, ctx.theme.text_height, text, ctx.user_pointer)
-		ui_draw_text(ctx, text, ctx.min + [2]int{ ctx.theme.text_padding, ctx.theme.text_padding + ctx.theme.text_height, }, color, .Monospace, text_height)
+		width       := ctx.measure_text(font, ctx.theme.text_height, text, ctx.user_pointer)
+		ui_draw_text(ctx, text, ctx.min + [2]int{ ctx.theme.text_padding, ctx.theme.text_padding + ctx.theme.text_height, }, color, font, text_height)
 		ctx.extents.max = la.max(
 			ctx.extents.max,
 			[2]int {

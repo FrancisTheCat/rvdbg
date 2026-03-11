@@ -10,6 +10,11 @@ uniform vec2 u_resolution;
 uniform vec2 u_scale;
 
 struct DrawCommand {
+	uint count;
+	uint instance_count;
+	uint first_vertex;
+	uint base_instance;
+
     vec2 offset;
     vec2 scale;
 };
