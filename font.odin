@@ -1,6 +1,3 @@
-// The font rendering algorithm used here is not particularly good, at very least at lot more stuff should be cached, ideally on the gpu:
-// We should probably store shape data per glyph on the gpu and then do a MultiDrawElementsIndirect to instance those glyph meshes
-// At least we trivially support fractional scaling, font size changes and subpixel rendering and positioning
 package rvdbg
 
 import la "core:math/linalg"
@@ -10,8 +7,7 @@ import ttf "odin-ttf"
 
 @(rodata)
 FONT_PATHS := [Ui_Font]string {
-	// .Monospace = "/usr/share/fonts/TTF/NotoSans.ttf",
-	.Interface = "/usr/share/fonts/TTF/IBMPlexSansTC-Regular.ttf",
+	.Interface = "/usr/share/fonts/TTF/IBMPlexSans-Regular.ttf",
 	// .Interface = "/usr/share/fonts/TTF/JetBrainsMonoNerdFont-Regular.ttf",
 	.Monospace = "/usr/share/fonts/TTF/JetBrainsMonoNerdFont-Regular.ttf",
 }
