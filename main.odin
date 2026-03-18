@@ -6,7 +6,6 @@ import "base:runtime"
 import rb  "core:container/rbtree"
 import     "core:fmt"
 import la  "core:math/linalg"
-import glm "core:math/linalg/glsl"
 import     "core:mem"
 import     "core:mem/virtual"
 import     "core:os"
@@ -17,9 +16,8 @@ import     "core:terminal/ansi"
 import     "core:unicode/utf8"
 import     "core:prof/spall"
 
-import     "glodin"
-import     "input"
-import ttf "odin-ttf"
+import "glodin"
+import "input"
 
 import "vendor:glfw"
 
@@ -56,15 +54,41 @@ debugger_load_file :: proc(debugger: ^Debugger, path: string) -> (ok: bool) {
 		debugger_reset(debugger)
 		debugger_load_program(debugger, string(source))
 	} else {
-		delete(debugger.last_error)
-		debugger.last_error = fmt.aprintf("Failed to open file: %s", path)
+		debugger_set_last_error(debugger, fmt.tprintf("Failed to open file: %s", path))
 	}
 
 	return err == nil
 }
 
-debugger_load_program :: proc(debugger: ^Debugger, source: string) {
-	sections, relocations, labels, errors := parse_assembly(source, context.temp_allocator, context.temp_allocator)
+debugger_load_program :: proc(debugger: ^Debugger, source: string) -> (ok: bool) {
+	for s in debugger.sections {
+		switch v in s.data {
+		case []Instruction: delete(v)
+		case []byte:        delete(v)
+		}
+	}
+	delete(debugger.sections)
+	delete(debugger.relocations)
+	delete(debugger.source)
+	rb.destroy(&debugger.labels)
+
+	debugger.source = string_replace_tabs(source, context.allocator)
+
+	errors: []Error
+	labels: map[string]Location
+	debugger.sections, debugger.relocations, labels, errors = parse_assembly(debugger.source, context.allocator, context.temp_allocator)
+	defer delete(labels)
+
+	defer if !ok {
+		delete(debugger.sections)
+		delete(debugger.relocations)
+		delete(debugger.source)
+
+		debugger.sections    = {}
+		debugger.relocations = {}
+		debugger.labels      = {}
+		debugger.source      = {}
+	}
 
 	error: bool
 	for e in errors {
@@ -83,7 +107,7 @@ debugger_load_program :: proc(debugger: ^Debugger, source: string) {
 		return
 	}
 
-	linker_errors := resolve_relocations(sections, labels, relocations, context.temp_allocator)
+	linker_errors := resolve_relocations(debugger.sections, labels, debugger.relocations, context.temp_allocator)
 
 	for e in linker_errors {
 		switch e.severity {
@@ -106,10 +130,18 @@ debugger_load_program :: proc(debugger: ^Debugger, source: string) {
 		fmt.println("No `_start` label found, starting at PC = 0")
 	}
 
-	debugger.cpu.pc = u32(sections[start_label.section].offset + start_label.offset)
+	debugger.cpu.pc = u32(debugger.sections[start_label.section].offset + start_label.offset)
 	debugger.state  = .Debugger_Paused
 
-	cpu_load_sections(&debugger.cpu, sections)
+	cpu_load_sections(&debugger.cpu, debugger.sections)
+
+	rb.init(&debugger.labels)
+	for label, location in labels {
+		rb.find_or_insert(&debugger.labels, debugger.sections[location.section].offset + location.offset, label)
+	}
+
+	ok = true
+	return
 }
 
 ENABLE_SPALL :: #config(ENABLE_SPALL, false)
@@ -156,27 +188,41 @@ main :: proc() {
 		defer spall.buffer_destroy(&spall_ctx, &spall_buffer)
 	}
 
+	debugger: Debugger = {
+		register_names  = true,
+		render_settings = {
+			subpixel     = true,
+			font_quality = 2,
+		},
+	}
+	rb.init(&debugger.breakpoints)
+
 	mem, err := virtual.reserve_and_commit(1 << 32 + 3)
 	assert(err == nil)
 
-	debugger: Debugger
 	cpu_init(&debugger.cpu, mem, strings.to_writer(&debugger.output_buffer))
-
 	debugger.focused_address = debugger.cpu.pc
-	debugger.register_names  = true
-	debugger.subpixel        = true
-	debugger.state           = .Debugger_Paused
-	debugger.font_quality    = 2
-
-	rb.init(&debugger.breakpoints)
 
 	defer {
+		watch_window_destroy(&debugger.watch_window)
+		label_view_destroy(&debugger.label_view)
+
 		strings.builder_destroy(&debugger.output_buffer)
 		strings.builder_destroy(&debugger.memory_view.input)
-		watch_window_destroy(&debugger.watch_window)
 		rb.destroy(&debugger.breakpoints)
+		rb.destroy(&debugger.labels)
 		delete(debugger.last_error)
 		delete(debugger.file_path)
+
+		for s in debugger.sections {
+			switch v in s.data {
+			case []Instruction: delete(v)
+			case []byte:        delete(v)
+			}
+		}
+		delete(debugger.source)
+		delete(debugger.sections)
+		delete(debugger.relocations)
 	}
 
 	ok := glfw.Init();
@@ -208,17 +254,9 @@ main :: proc() {
 
 	glodin.window_size_callback(window.size.x, window.size.y)
 
-	program := glodin.create_program_source(#load("vertex.glsl"), #load("fragment.glsl")) or_else panic("Failed to compile program")
-	defer glodin.destroy(program)
-
-	fonts: [Ui_Font]Font
-	defer for font in fonts {
-		delete(font.data)
-	}
-	for &font, font_id in fonts {
-		font.data = os.read_entire_file(FONT_PATHS[font_id], context.allocator) or_else panic("Failed to open font file")
-		font.font = ttf.load(font.data) or_else panic("Failed to load font")
-	}
+	renderer: Renderer
+	renderer_init(&renderer)
+	defer renderer_destroy(renderer)
 
 	ui_ctx: Ui_Context
 	ui_context_init(
@@ -226,40 +264,11 @@ main :: proc() {
 		proc(font: Ui_Font, font_size: int, text: string, user_pointer: rawptr) -> f32 {
 			return measure_text((^[Ui_Font]Font)(user_pointer)[font], text)
 		},
-		&fonts,
+		&renderer.fonts,
 	)
 	defer ui_context_destroy(&ui_ctx)
 
 	glodin.clear_color({}, ui_ctx.theme.colors[.Background])
-
-	Vertex_2D :: struct {
-		position: glm.vec2,
-	}
-
-	quad_vertex_buffer: []Vertex_2D = {
-		{ position = { 0, 0, }, },
-		{ position = { 0, 1, }, },
-		{ position = { 1, 0, }, },
-
-		{ position = { 1, 1, }, },
-		{ position = { 0, 1, }, },
-		{ position = { 1, 0, }, },
-	}
-
-	quad := glodin.create_mesh(quad_vertex_buffer[:])
-	defer glodin.destroy_mesh(quad)
-
-	instance_buffer := make([dynamic]Instance_Data, context.allocator)
-	defer delete(instance_buffer)
-
-	glodin.disable(.Cull_Face)
-	glodin.set_stencil_op(.Keep, .Keep, .Incr_Wrap, .Front)
-	glodin.set_stencil_op(.Keep, .Keep, .Zero, .Back)
-	glodin.set_min_sample_shading(1)
-
-	font_draw_ctx: Font_Draw_Context
-	font_draw_context_init(&font_draw_ctx)
-	defer font_draw_context_destroy(font_draw_ctx)
 
 	last_print_time    := time.now()
 	frames_since_print := 0
@@ -277,16 +286,6 @@ main :: proc() {
 			last_print_time    = time.now()
 		}
 
-		@(static)
-		prev_text_height := -1
-		if ui_ctx.theme.text_height != prev_text_height {
-			for &font in fonts {
-				font.font_height = f32(ui_ctx.theme.text_height)
-				font.scale       = ttf.font_height_to_scale(font.font, font.font_height)
-			}
-			prev_text_height = ui_ctx.theme.text_height
-		}
-
 		{
 			fx, fy     := glfw.GetFramebufferSize(window.handle)
 			window.size = { int(fx), int(fy), }
@@ -294,8 +293,6 @@ main :: proc() {
 			ww, wh             := glfw.GetWindowSize(window.handle)
 			window.virtual_size = { int(ww), int(wh), }
 		}
-
-		scale := la.array_cast(window.size, f32) / la.array_cast(window.virtual_size, f32)
 
 		mouse_position     := la.array_cast(input.get_mouse_position(), int)
 		mouse_delta        := mouse_position - prev_mouse_position
@@ -382,61 +379,16 @@ main :: proc() {
 
 		debugger_ui(&ui_ctx, &debugger)
 
-		clear(&instance_buffer)
+		glodin.clear_color({}, ui_ctx.theme.colors[.Background])
 
-		for cmd in ui_get_draw_commands(ui_ctx) {
-			switch cmd in cmd {
-			case Ui_Cmd_Text:
-				draw_string(
-					&font_draw_ctx,
-					&instance_buffer,
-					&fonts[cmd.font],
-					cmd.text,
-					{ f32(cmd.position.x), f32(cmd.position.y), },
-					fonts[cmd.font].scale,
-					cmd.color,
-				)
-			case Ui_Cmd_Rect:
-				rect := cmd.rect
-				if rect.min.x > rect.max.x || rect.min.y > rect.max.y {
-					break
-				}
-
-				append(&instance_buffer, Instance_Data {
-					rect                = [4]f32{ f32(rect.min.x), f32(rect.min.y), f32(rect.max.x), f32(rect.max.y), },
-					color               = cmd.color,
-					border_color        = cmd.border.color,
-					border_width_radius = [2]f32{ f32(cmd.border.width), f32(cmd.border.radius), } * scale.y, // not correct when we are scaled non-uniformly, but do we really care?
-				})
-
-				min := la.array_cast(rect.min, f32)
-				max := la.array_cast(rect.max, f32)
-				draw_font_clear_quad(&font_draw_ctx, min, max)
-			}
-		}
-
-		font_samples := 1 << uint(debugger.font_quality)
-		font_draw_context_draw(&font_draw_ctx, window.size, scale, font_samples, debugger.subpixel)
-
-		{
-			glodin.enable(.Blend)
-			defer glodin.disable(.Blend)
-
-			glodin.clear_color({}, ui_ctx.theme.colors[.Background])
-
-			mesh := glodin.create_instanced_mesh(quad, instance_buffer[:])
-			defer glodin.destroy(mesh)
-
-			glodin.set_uniforms(program, {
-				{ "u_font_stencil",  font_draw_ctx.stencil_texture,   },
-				{ "u_resolution",    la.array_cast(window.size, f32), },
-				{ "u_font_samples",  u32(font_samples),               },
-				{ "u_font_subpixel", debugger.subpixel,               },
-				{ "u_scale" ,        scale,                           },
-			})
-
-			glodin.draw({}, program, mesh)
-		}
+		debugger.render_settings.text_height = ui_ctx.theme.text_height
+		debugger.render_settings.scale       = la.array_cast(window.size, f32) / la.array_cast(window.virtual_size, f32)
+		render_ui(
+			&renderer,
+			ui_get_draw_commands(ui_ctx),
+			window.size,
+			debugger.render_settings,
+		)
 
 		glfw.SwapBuffers(window.handle)
 
@@ -447,31 +399,38 @@ main :: proc() {
 	}
 }
 
-Instance_Data :: struct {
-	rect, tex_rect:      glm.vec4,
-	color, border_color: glm.vec4,
-	border_width_radius: glm.vec2,
-	has_font:            i32,
-}
-
 Debugger :: struct {
 	cpu:             CPU,
 	state:           CPU_State,
+
+	sections:        []Section,
+	relocations:     []Relocation,
+	instructions:    []Instruction,
+	labels:          rb.Tree(u32, string),
+	source:          string,
 	output_buffer:   strings.Builder,
 	breakpoints:     rb.Tree(u32, bool),
-	focused_address: u32,
-	register_names:  bool,
-	memory_view:     struct {
-		input:   strings.Builder,
-		address: u32,
-	},
+
+	memory_view:     Memory_View,
 	watch_window:    Watch_Window,
+	label_view:      Label_View,
+
 	last_error:      string,
 	file_path:       string,
+
+	focused_address: u32,
+	target_address:  Maybe(u32),
+	warp_focus:      bool,
 	should_close:    bool,
-	subpixel:        bool,
-	font_quality:    int,
-	glyph_count:     int,
+
+	register_names:  bool,
+
+	render_settings: Render_Settings,
+}
+
+Memory_View :: struct {
+	input:   strings.Builder,
+	address: u32,
 }
 
 debugger_ui :: proc(ctx: ^Ui_Context, debugger: ^Debugger) {
@@ -489,7 +448,7 @@ debugger_ui :: proc(ctx: ^Ui_Context, debugger: ^Debugger) {
 		debugger.state = .Running
 	}
 
-	warp_focus := step
+	debugger.warp_focus = step
 
 	if ui_section(ctx, "Menu Bar", .Down, { .Separator, }) {
 		ctx.direction = .Right
@@ -497,7 +456,7 @@ debugger_ui :: proc(ctx: ^Ui_Context, debugger: ^Debugger) {
 			if .Clicked in ui_button(ctx, "Open") {
 				path, ok := dialog_file_open()
 				if ok && debugger_load_file(debugger, path) {
-					warp_focus = true
+					debugger.warp_focus = true
 				}
 				ui_popup_close(ctx)
 			}
@@ -545,13 +504,13 @@ debugger_ui :: proc(ctx: ^Ui_Context, debugger: ^Debugger) {
 			named_slider(ctx, "Border Width",  &ctx.theme.border_width,  1, 10)
 			named_slider(ctx, "Border Radius", &ctx.theme.border_radius, 0, 20)
 			named_slider(ctx, "Text Height",   &ctx.theme.text_height,   0, 20)
-			named_slider(ctx, "Font Quality",  &debugger.font_quality,   1,  3)
+			named_slider(ctx, "Font Quality",  &debugger.render_settings.font_quality, 1,  3)
 
 			if .Clicked in ui_button(ctx, "Reset Theme") {
 				ctx.theme = UI_DEFAULT_THEME
 			}
-			debugger.register_names ~= .Clicked in ui_button(ctx, "Register Names")
-			debugger.subpixel       ~= .Clicked in ui_button(ctx, "Subpixel Rendering")
+			debugger.register_names           ~= .Clicked in ui_button(ctx, "Register Names")
+			debugger.render_settings.subpixel ~= .Clicked in ui_button(ctx, "Subpixel Rendering")
 		}
 
 		if ui_popup_toggle(ctx, "Run") {
@@ -568,7 +527,7 @@ debugger_ui :: proc(ctx: ^Ui_Context, debugger: ^Debugger) {
 			}
 			if .Clicked in ui_button(ctx, "Reset") {
 				if debugger_load_file(debugger, debugger.file_path) {
-					warp_focus = true
+					debugger.warp_focus = true
 				}
 				ui_popup_close(ctx)
 			}
@@ -710,6 +669,10 @@ debugger_ui :: proc(ctx: ^Ui_Context, debugger: ^Debugger) {
 			)
 		}
 
+		if ui_toggle_section(ctx, "Labels", .Down, { .Separator, }) {
+			label_view_ui(ctx, debugger, &debugger.label_view)
+		}
+
 		if ui_toggle_section(ctx, "Watch", .Down, { .Separator, }) {
 			watch_window_ui(ctx, debugger, &debugger.watch_window)
 		}
@@ -844,6 +807,8 @@ debugger_ui :: proc(ctx: ^Ui_Context, debugger: ^Debugger) {
 				node = nil
 				rb.remove(&debugger.breakpoints, address)
 			}
+		} else if address == debugger.target_address {
+			background_color = ctx.theme.colors[.Button]
 		} else if address == debugger.cpu.pc {
 			background_color = ctx.theme.colors[.Button]
 		}
@@ -908,7 +873,8 @@ debugger_ui :: proc(ctx: ^Ui_Context, debugger: ^Debugger) {
 	visible_instructions    := clamp((ctx.max.y - ctx.min.y) / instruction_height, 0, len(instructions) - 1)
 	instructions             = instructions[:visible_instructions]
 
-	pc_visible: bool
+	target_visible: bool
+	target_address := debugger.target_address.? or_else debugger.cpu.pc
 	for inst, i in instructions {
 		address := debugger.focused_address + u32(i) * 4
 		ui_instruction(
@@ -918,11 +884,11 @@ debugger_ui :: proc(ctx: ^Ui_Context, debugger: ^Debugger) {
 			address,
 		)
 
-		pc_visible ||= address == debugger.cpu.pc
+		target_visible ||= address == target_address
 	}
 
-	if !pc_visible && warp_focus {
-		debugger.focused_address = debugger.cpu.pc
+	if !target_visible && debugger.warp_focus {
+		debugger.focused_address = target_address
 	}
 }
 
@@ -940,4 +906,54 @@ debugger_reset :: proc(debugger: ^Debugger) {
 
 	cpu_init(&debugger.cpu, debugger.cpu.mem, strings.to_writer(&debugger.output_buffer))
 	strings.builder_reset(&debugger.output_buffer)
+}
+
+debugger_toggle_breakpoint :: proc(debugger: ^Debugger, address: u32) {
+	node := rb.find(debugger.breakpoints, address)
+
+	if node != nil {
+		node.value ~= true
+	} else {
+		rb.find_or_insert(&debugger.breakpoints, address, true)
+	}
+}
+
+Label_View :: struct {
+	filter:         string,
+	filter_builder: strings.Builder,
+}
+
+label_view_ui :: proc(ctx: ^Ui_Context, debugger: ^Debugger, label_view: ^Label_View) {
+	if .Submit in ui_textbox(ctx, &label_view.filter_builder, "filter") {
+		delete(label_view.filter)
+		label_view.filter = strings.clone(strings.to_string(label_view.filter_builder))
+	}
+	iterator := rb.iterator(&debugger.labels, .Forward)
+	for node in rb.iterator_next(&iterator) {
+		address := node.key
+		label   := node.value
+
+		if label_view.filter != "" && !strings.contains(label, label_view.filter) {
+			continue
+		}
+
+		result := ui_button(ctx, label)
+		if .Clicked in result {
+			debugger_toggle_breakpoint(debugger, address)
+			debugger.warp_focus = true
+		}
+		if .Tooltip in result {
+			if ui_tooltip_popup(ctx, fmt.tprint(label, "tooltip")) {
+				ui_label(ctx, fmt.tprintf("0x%x", address))
+			}
+		}
+		if .Hovered in result {
+			debugger.target_address = address
+		}
+	}
+}
+
+label_view_destroy :: proc(label_view: ^Label_View) {
+	delete(label_view.filter)
+	strings.builder_destroy(&label_view.filter_builder)
 }

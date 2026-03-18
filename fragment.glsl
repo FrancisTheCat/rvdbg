@@ -14,9 +14,12 @@ layout(location = 0) out vec4 f_color;
 uniform vec2         u_resolution;
 uniform vec2         u_scale;
 
+// 0: stencil, no subpixel aa
+// 1: stencil, subpixel aa
+uniform int          u_font_mode;
+
 uniform usampler2DMS u_font_stencil;
-uniform uint         u_font_samples;
-uniform bool         u_font_subpixel;
+uniform int          u_font_samples;
 
 // adapted from https://iquilezles.org/articles/distfunctions2d/
 float rounded_box_sdf(vec2 p, vec2 b, float r) {
@@ -57,7 +60,19 @@ void main() {
     f_color *= v_color;
 
     if (v_has_font != 0) {
-        if (u_font_subpixel) {
+        switch (u_font_mode) {
+        case 0: {
+            uint count = 0;
+            for (int sample_index = 0; sample_index < u_font_samples; sample_index += 1) {
+                count += texelFetch(
+                    u_font_stencil,
+                    ivec2(gl_FragCoord.xy),
+                    sample_index
+                ).x % 2;
+            }
+            f_color *= pow(float(count) / float(u_font_samples), 1 / 2.2);
+        } break;
+        case 1: {
             uint counts[7] = { 0, 0, 0, 0, 0, 0, 0, };
             uint count     = 0;
             for (int offset = 0; offset < 7; offset += 1) {
@@ -91,16 +106,27 @@ void main() {
 
             f_color.rgb *= channel_weights;
             f_color.a   *= (channel_weights.x + channel_weights.y + channel_weights.z) / 3;
-        } else {
-            uint count = 0;
-            for (int sample_index = 0; sample_index < u_font_samples; sample_index += 1) {
-                count += texelFetch(
-                    u_font_stencil,
-                    ivec2(gl_FragCoord.xy),
-                    sample_index
-                ).x % 2;
-            }
-            f_color *= pow(float(count) / float(u_font_samples), 1 / 2.2);
+        } break;
+        #if 0
+        case 2: {
+            uvec4 coverage = textureGather(u_font_coverage, v_tex_coords, 0);
+            uint  tl       = coverage.x;
+            uint  tr       = coverage.y;
+            uint  bl       = coverage.w;
+            uint  br       = coverage.z;
+            uint  xmask    = u_font_mask_table[v_font_shift.x];
+            uint  ymask    = (1 << (v_font_shift.y)) - 1;
+
+            uint result = (
+                bl & ~xmask & ~ymask |
+                br &  xmask & ~ymask |
+                tl & ~xmask &  ymask |
+                tr &  xmask &  ymask
+            );
+
+            f_color *= pow(float(bitCount(result)) / 16, 1 / 2.2);
+        } break;
+        #endif
         }
     }
 

@@ -3,7 +3,6 @@ package rvdbg
 import "base:intrinsics"
 import "base:runtime"
 
-import "core:bytes"
 import "core:fmt"
 import "core:io"
 import "core:math/rand"
@@ -511,7 +510,7 @@ parse_assembly :: proc(
 		constants:          map[string]int,
 		relocations:        [dynamic]Relocation,
 		instructions:       [dynamic]Instruction,
-		data_buffer:        bytes.Buffer,
+		data_buffer:        [dynamic]byte,
 		sections:           [dynamic]Section,
 		errors:             [dynamic]Error,
 		error_allocator:    runtime.Allocator,
@@ -552,12 +551,12 @@ parse_assembly :: proc(
 			switch ctx.section_type {
 			case .Data:
 				section.flags = { .Write, }
-				section.data  = ctx.data_buffer.buf[:]
-				section.len   = len(ctx.data_buffer.buf[:])
+				section.data  = ctx.data_buffer[:]
+				section.len   = len(ctx.data_buffer[:])
 			case .Rodata:
 				section.flags = {}
-				section.data  = ctx.data_buffer.buf[:]
-				section.len   = len(ctx.data_buffer.buf[:])
+				section.data  = ctx.data_buffer[:]
+				section.len   = len(ctx.data_buffer[:])
 			case .Text:
 				section.flags = { .Execute, }
 				section.data  = ctx.instructions[:]
@@ -570,25 +569,24 @@ parse_assembly :: proc(
 		ctx.offset         = 0
 		ctx.section_offset = 0
 		ctx.instructions   = make([dynamic]Instruction, ctx.data_allocator)
-		ctx.data_buffer    = {}
-		bytes.buffer_init_allocator(&ctx.data_buffer, 0, 0, ctx.data_allocator)
+		ctx.data_buffer    = make([dynamic]byte,        ctx.data_allocator)
 	}
 
 	ctx := &Parsing_Context {
 		errors          = make([dynamic]Error,       error_allocator),
 		instructions    = make([dynamic]Instruction, data_allocator),
+		data_buffer     = make([dynamic]byte,        data_allocator),
 		sections        = make([dynamic]Section,     data_allocator),
 		relocations     = make([dynamic]Relocation,  data_allocator),
 		labels          = make(map[string]Location,  data_allocator),
 		error_allocator = error_allocator,
 		data_allocator  = data_allocator,
 	}
-	bytes.buffer_init_allocator(&ctx.data_buffer, 0, 0, ctx.data_allocator)
 
 	defer {
 		delete(ctx.constants)
 		delete(ctx.instructions)
-		delete(ctx.data_buffer.buf)
+		delete(ctx.data_buffer)
 	}
 
 	lines_loop: for line in strings.split_lines_iterator(&data) {
@@ -644,6 +642,10 @@ parse_assembly :: proc(
 
 				line := strings.trim_right_space(line)
 				for {
+					write_ptr :: proc(buffer: ^[dynamic]byte, ptr: ^$T) -> int {
+						return append(buffer, ..([^]byte)(ptr)[:size_of(T)])
+					}
+
 					arg_len := min(
 						uint(strings.index_byte(line, ' ')),
 						uint(strings.index_byte(line, ',')),
@@ -665,7 +667,7 @@ parse_assembly :: proc(
 						})
 
 						zero: u32
-						bytes.buffer_write_ptr(&ctx.data_buffer, &zero, size_of(zero))
+						write_ptr(&ctx.data_buffer, &zero)
 						ctx.offset += 4
 					} else {
 						val, ok := strconv.parse_i128(arg)
@@ -674,25 +676,24 @@ parse_assembly :: proc(
 							break
 						}
 
-						n:   int
-						err: io.Error
+						n: int
 						switch bits {
 						case 8:
 							val_i8  := i8(val)
-							n, err   = bytes.buffer_write_ptr(&ctx.data_buffer, &val_i8,  size_of(val_i8))
+							n        = write_ptr(&ctx.data_buffer, &val_i8)
 						case 16:
 							val_i16 := i16(val)
-							n, err   = bytes.buffer_write_ptr(&ctx.data_buffer, &val_i16, size_of(val_i16))
+							n        = write_ptr(&ctx.data_buffer, &val_i16)
 						case 32:
 							val_i32 := i32(val)
-							n, err   = bytes.buffer_write_ptr(&ctx.data_buffer, &val_i32, size_of(val_i32))
+							n        = write_ptr(&ctx.data_buffer, &val_i32)
 						case 64:
 							val_i64 := i64(val)
-							n, err   = bytes.buffer_write_ptr(&ctx.data_buffer, &val_i64, size_of(val_i64))
+							n        = write_ptr(&ctx.data_buffer, &val_i64)
 						case:
 							unreachable()
 						}
-						assert(err == nil)
+						assert(n == int(bits) / 8)
 						ctx.offset += n
 					}
 
@@ -782,19 +783,19 @@ parse_assembly :: proc(
 							errorf(ctx, "Unknown escape character: `%v`", arg[i])
 							continue lines_loop
 						}
-						bytes.buffer_write_byte(&ctx.data_buffer, value)
+						append(&ctx.data_buffer, value)
 						n += 1
 					case '"':
 						errorf(ctx, "Invalid argument to .ascii directive: `%s`", arg)
 						continue lines_loop
 					case:
-						bytes.buffer_write_byte(&ctx.data_buffer, arg[i])
+						append(&ctx.data_buffer, arg[i])
 						n += 1
 					}
 				}
 
 				if directive != "ascii" {
-					bytes.buffer_write_byte(&ctx.data_buffer, 0)
+					append(&ctx.data_buffer, 0)
 					n += 1
 				}
 				ctx.offset += n
@@ -817,7 +818,7 @@ parse_assembly :: proc(
 				n, ok := strconv.parse_uint(arg)
 				if ok {
 					for _ in 0 ..< n {
-						bytes.buffer_write_byte(&ctx.data_buffer, 0)
+						append(&ctx.data_buffer, 0)
 					}
 					ctx.offset += int(n)
 				} else {

@@ -64,6 +64,10 @@ font_draw_context_init :: proc(
 	glyph_buffer_size := 1 << 20, // Max number of (non-distinct) glyphs drawn in one frame
 	allocator         := context.allocator,
 ) {
+	glodin.set_stencil_op(.Keep, .Keep, .Incr_Wrap, .Front)
+	glodin.set_stencil_op(.Keep, .Keep, .Zero, .Back)
+	glodin.set_min_sample_shading(1)
+
 	ctx.glyph_cache = {
 		glyphs = make(map[Glyph_Cache_Key]Glyph_Cache_Entry, allocator),
 		mesh   = glodin.create_mesh((([^]Font_Vertex)(nil))[:glyph_cache_size]),

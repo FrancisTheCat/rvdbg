@@ -523,6 +523,9 @@ ui_rect_result :: proc(ctx: ^Ui_Context, rect: Ui_Rect) -> (result: Ui_Result) {
 		case .Clicked:
 			result |= { .Down, }
 		}
+		if ctx.current_time - ctx.mouse_last_move_time > UI_HOVER_THRESHOLD {
+			result |= { .Tooltip, }
+		}
 	}
 	return
 }
@@ -665,10 +668,6 @@ ui_label :: proc(
 	width  := int(ctx.measure_text(font, ctx.theme.text_height, text, ctx.user_pointer)) + ctx.theme.text_padding * 2
 	rect   := ui_insert_rect(ctx, { width, ctx.theme.text_height + ctx.theme.text_padding * 2, })
 	result  = ui_rect_result(ctx, rect)
-
-	if .Hovered in result && ctx.current_time - ctx.mouse_last_move_time > UI_HOVER_THRESHOLD {
-		result |= { .Tooltip, }
-	}
 
 	if min_size != nil {
 		min_size^ = { width, ctx.theme.text_height + ctx.theme.text_padding * 2, }
